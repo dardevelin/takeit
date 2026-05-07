@@ -30,29 +30,46 @@ from takeit.cli import _zipstream as Z
 from takeit.errors import KeyFormatError, WrongPasswordError
 
 
-def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer"):
+class _Noop:
+    """No-op progress shim with the same surface as tqdm + _SpinningBar.
+
+    Returned from `_make_progress_bar` when output is suppressed (either
+    `--hide-progress` or stdout isn't a TTY). The methods deliberately do
+    nothing so call sites don't need to special-case the missing bar.
+    """
+
+    def update(self, n):
+        pass
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _NoopSpinner:
+    """No-op spinner shim with the same surface as TossSpinner. Returned
+    from `_make_spinner` when output is suppressed."""
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer", hide=False):
     """Build a tqdm progress bar configured for byte-rate display, with
     a tumbling-block prefix (Yobi) whose rotation rate tracks throughput.
 
-    Returns a no-op shim if stdout isn't a TTY so tqdm doesn't paint
-    progress lines into log files / pipes / CI runs. The shim has the
-    same `update`, `close`, `__enter__`, and `__exit__` surface.
+    Returns a no-op shim when `hide=True` or stdout isn't a TTY so tqdm
+    doesn't paint progress lines into log files / pipes / CI runs.
     """
-    if not sys.stdout.isatty():
-
-        class _Noop:
-            def update(self, n):
-                pass
-
-            def close(self):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
+    if hide or not sys.stdout.isatty():
         return _Noop()
     bar = tqdm_module.tqdm(
         total=total_bytes,
@@ -64,6 +81,15 @@ def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer"):
         leave=False,
     )
     return _SpinningBar(bar, desc, initial_bytes)
+
+
+def _make_spinner(reactor, hide=False):
+    """Build a TossSpinner, or a no-op shim when output is suppressed
+    (`--hide-progress` or non-TTY). The toss-spinner is purely visual,
+    so suppress it on the same conditions as the progress bar."""
+    if hide or not sys.stdout.isatty():
+        return _NoopSpinner()
+    return Sp.TossSpinner(reactor)
 
 
 class _SpinningBar:
@@ -191,9 +217,26 @@ def main(ctx, debug):
     help="Show the short authentication string (SAS) and pause for "
     "out-of-band comparison before any payload moves.",
 )
+@click.option(
+    "--hide-progress",
+    "hide_progress",
+    is_flag=True,
+    default=False,
+    help="Suppress the progress bar and spinner. Auto-suppressed when "
+    "stdout is not a terminal.",
+)
 @click.pass_context
 def cmd_send(
-    ctx, path, text_input, code_length, relays, explicit_code, no_cache, qr, verify
+    ctx,
+    path,
+    text_input,
+    code_length,
+    relays,
+    explicit_code,
+    no_cache,
+    qr,
+    verify,
+    hide_progress,
 ):
     """Send a file, directory, or text.
 
@@ -212,7 +255,16 @@ def cmd_send(
         text = sys.stdin.read() if text_input == "-" else text_input
         react(
             _run_send_text,
-            (text, code_length, relay_list, explicit_code, qr, verify, debug),
+            (
+                text,
+                code_length,
+                relay_list,
+                explicit_code,
+                qr,
+                verify,
+                hide_progress,
+                debug,
+            ),
         )
         return
     # Path validation runs here (not in the Click annotation) so that
@@ -232,6 +284,7 @@ def cmd_send(
             not no_cache,
             qr,
             verify,
+            hide_progress,
             debug,
         ),
     )
@@ -268,8 +321,16 @@ def cmd_send(
     help="Show the short authentication string (SAS) and pause for "
     "out-of-band comparison before accepting any payload.",
 )
+@click.option(
+    "--hide-progress",
+    "hide_progress",
+    is_flag=True,
+    default=False,
+    help="Suppress the progress bar and spinner. Auto-suppressed when "
+    "stdout is not a terminal.",
+)
 @click.pass_context
-def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify):
+def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify, hide_progress):
     """Receive a file using a code.
 
     If no CODE is given, you'll be prompted to type one with tab-completion
@@ -286,6 +347,7 @@ def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify):
             relay_list,
             output_dir,
             verify,
+            hide_progress,
             ctx.obj.get("debug", False),
         ),
     )
@@ -358,6 +420,7 @@ def _run_send(
     use_cache,
     qr,
     verify,
+    hide_progress,
     debug,
 ):
     chunk_size = P.DEFAULT_CHUNK_SIZE
@@ -397,6 +460,7 @@ def _run_send(
                 explicit_code,
                 qr,
                 verify,
+                hide_progress,
                 debug,
                 kind=P.KIND_DIRECTORY,
                 num_files=num_files,
@@ -451,6 +515,7 @@ def _run_send(
         explicit_code,
         qr,
         verify,
+        hide_progress,
         debug,
         kind=P.KIND_FILE,
     )
@@ -465,6 +530,7 @@ def _run_send_text(
     explicit_code,
     qr,
     verify,
+    hide_progress,
     debug,
 ):
     """Send a text message inline. The offer IS the payload — no
@@ -489,7 +555,7 @@ def _run_send_text(
         w.send_message(P.encode_message(offer_msg))
 
         # Wait for receiver's accept/decline.
-        spinner = Sp.TossSpinner(reactor)
+        spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
             answer_payload = yield w.get_message()
@@ -526,6 +592,7 @@ def _do_send(
     explicit_code,
     qr,
     verify,
+    hide_progress,
     debug,
     *,
     kind,
@@ -572,7 +639,7 @@ def _do_send(
         w.send_message(P.encode_message(offer_msg))
 
         # Wait for the receiver's accept/decline.
-        spinner = Sp.TossSpinner(reactor)
+        spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
             answer_payload = yield w.get_message()
@@ -586,7 +653,7 @@ def _do_send(
 
         # Dilate and open the bulk subchannel. Spin during the handshake —
         # STUN candidates racing, Noise prologue, KCM selection.
-        spinner = Sp.TossSpinner(reactor)
+        spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
             dw = w.dilate()
@@ -604,7 +671,7 @@ def _do_send(
         # Maximum bytes that could be sent (full transfer). The actual
         # number is reduced by chunks_have which we don't know yet — the
         # progress bar's total updates after the receiver replies.
-        progress = _make_progress_bar(size, desc="sending")
+        progress = _make_progress_bar(size, desc="sending", hide=hide_progress)
         try:
             yield _send_chunks_over_subchannel(
                 reactor, ep, payload_path, chunk_size, chunk_hashes, progress=progress
@@ -825,7 +892,16 @@ def _rmtree_quiet(path):
 
 
 @inlineCallbacks
-def _run_receive(reactor, code, auto_accept, relays, output_dir, verify, debug):
+def _run_receive(
+    reactor,
+    code,
+    auto_accept,
+    relays,
+    output_dir,
+    verify,
+    hide_progress,
+    debug,
+):
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         # B2: resolve output_dir via realpath so a symlinked output_dir
@@ -868,7 +944,7 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, verify, debug):
         # Wait for the sender's offer. The sender may be hashing a large
         # file before they can publish — for a 10 GB source this is ~20 s.
         # Spinner makes the wait feel intentional rather than hung.
-        spinner = Sp.TossSpinner(reactor)
+        spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
             offer_payload = yield w.get_message()
@@ -984,7 +1060,7 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, verify, debug):
 
         # Spinner during the dilation handshake — the peer is finishing
         # the SPAKE2 confirmation and we're racing connection candidates.
-        spinner = Sp.TossSpinner(reactor)
+        spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
             dw = w.dilate()
@@ -993,7 +1069,11 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, verify, debug):
         finally:
             spinner.stop()
         click.echo(f"Receiving into {dest_path}...")
-        progress = _make_progress_bar(offer["size"], desc="receiving")
+        progress = _make_progress_bar(
+            offer["size"],
+            desc="receiving",
+            hide=hide_progress,
+        )
         try:
             yield _receive_chunks_over_subchannel(
                 reactor,
