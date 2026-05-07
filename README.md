@@ -188,9 +188,15 @@ Delegate-mode wormholes, `dilate()` for bulk-data subchannels,
 ```sh
 git clone https://github.com/dardevelin/takeit
 cd takeit
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/python -m pytest tests/
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pre-commit install        # ruff lint + format + pytest on every commit
+pytest tests/
 ```
+
+The pre-commit hooks call `pytest` from `PATH`; activate the venv before
+committing so they find the project's deps. CI runs the same checks via
+`.github/workflows/test.yml`.
 
 Two opt-in integration tests run only when env vars are set:
 `TAKEIT_TEST_RELAY=wss://...` (real Nostr relay) and

@@ -1,0 +1,44 @@
+# pre-commit hooks for takeit. Install with `pre-commit install` after
+# `pip install -e ".[dev]"`. Hooks run on every `git commit`; bypass once
+# in an emergency with `git commit --no-verify` (don't make a habit of it).
+#
+# CI runs the same checks via `.github/workflows/test.yml`, so anything
+# that passes here passes in CI too — modulo Python-version differences,
+# which are caught by CI's matrix.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      # Lint: errors, pyflakes, import sort, warnings (configured in
+      # pyproject.toml [tool.ruff.lint]). --fix auto-applies safe
+      # fixes (mostly import ordering); we re-stage the result.
+      - id: ruff
+        args: [--fix]
+      # Format: Black-compatible. Defaults are configured in
+      # pyproject.toml [tool.ruff.format].
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Run the full test suite before each commit. Today this takes
+      # ~1.5s for 271 tests; revisit if it starts dominating commit time.
+      #
+      # `language: system` invokes whichever `pytest` is on PATH, so this
+      # hook expects the takeit venv to be active (or pytest installed
+      # globally with the project's runtime deps). pre-commit's managed
+      # Python envs can't easily install editable local packages, so the
+      # system-Python path is the simplest portable contract: "if `pip
+      # install -e .[dev]` ran in your venv and that venv is active,
+      # this works."
+      - id: pytest
+        name: pytest
+        entry: pytest -q
+        language: system
+        # `pass_filenames: false` means the hook runs once per commit
+        # rather than once per changed file (pytest takes the same time
+        # either way, and we always want the full suite).
+        pass_filenames: false
+        # `always_run` so a commit that only touches non-Python files
+        # (e.g. README) still runs tests — they're fast and catch the
+        # rare case where a pyproject.toml edit breaks the import path.
+        always_run: true

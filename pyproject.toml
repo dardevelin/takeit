@@ -61,8 +61,8 @@ dev = [
     "pytest-twisted",
     "pytest-asyncio",
     "hypothesis",
-    "pyflakes",
     "ruff",
+    "pre-commit",
 ]
 publish = [
     "build",
@@ -82,3 +82,29 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "src/takeit"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = [".automat-visualize"]
+
+[tool.ruff.lint]
+# E = pycodestyle errors, F = pyflakes (catches the same things pyflakes
+# does, plus more), I = import sorting, W = pycodestyle warnings.
+# We can layer in B (bugbear), UP (pyupgrade), SIM (simplify) later once
+# the tree is clean and we've decided which idioms to enforce.
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests routinely import fixtures whose names appear unused but trigger
+# pytest auto-discovery; we don't want F401 to delete them. We rely on
+# explicit `_unused = ...` for genuinely-unused locals if needed.
+"tests/conftest.py" = ["F401"]
+# The dilation modules are largely lifted from upstream wormhole — see
+# NOTICE — and we deliberately don't reformat them aggressively in the
+# port. Apply only fatal checks (F = real bugs, undef names, etc).
+"src/takeit/_dilation/*.py" = ["E", "I", "W"]
+
+[tool.ruff.format]
+# Defaults are Black-compatible. quote-style defaults to "double" which
+# matches the existing tree.
