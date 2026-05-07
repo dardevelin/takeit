@@ -74,8 +74,12 @@ takeit receive
 
 …then type words and press TAB to autocomplete.
 
-The file lands in `~/Downloads` by default. Use `--output-dir` to save
-it elsewhere.
+The file lands in `~/Downloads` by default. Pass `--output-file PATH`
+(or `-o PATH`) to save somewhere else. If `PATH` is an existing
+directory, the file goes inside with the sender's name. If `PATH`
+doesn't exist, it's used as the full target — `takeit receive -o
+~/notes/today.md` saves to that path even if the sender called the
+file something else.
 
 ### Receiver speaks first
 
@@ -109,7 +113,7 @@ where the file is going, and the next attempt resumes from them.
 | `--code-length 4` (sender) | Use a 4-word code instead of 3. |
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
-| `--output-dir DIR` (receiver) | Save somewhere other than `~/Downloads`. |
+| `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |
 | `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <words>`. |
 | `--hide-progress` (both) | Suppress the progress bar and spinner. Auto-suppressed when stdout isn't a terminal. |
 | `--debug` | Show full error details if something goes wrong. |

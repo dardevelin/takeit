@@ -150,6 +150,44 @@ def _default_output_dir():
     return "."
 
 
+def _resolve_output_target(output_file, sender_name):
+    """Resolve --output-file into a (parent_dir, final_name) pair.
+
+    Wormhole-compatible semantics:
+    - None → (default_output_dir, sender_name).
+    - existing directory → (that_directory, sender_name).
+    - non-existing path with existing parent → (parent, basename)
+      (rename-on-receive).
+    - non-existing path with missing parent → ValueError early
+      (we refuse to silently mkdir -p; almost always a typo).
+    - existing file → ValueError (collision; refuse rather than
+      silently overwrite at resolve-time, even though the
+      final-write code has its own atomic-rename guard).
+
+    The returned `parent_dir` is realpath-resolved at this point, so
+    later TOCTOU races on the parent are caught by lstat at write time.
+    """
+    if output_file is None:
+        return _default_output_dir(), sender_name
+    target = os.path.abspath(output_file)
+    if os.path.isdir(target):
+        return target, sender_name
+    if os.path.exists(target):
+        # Existing non-directory (file, symlink to file, fifo, etc.).
+        # Refuse — the user likely meant to rename to a NEW path.
+        raise ValueError(
+            f"{output_file!r} already exists; refusing to overwrite. "
+            "Pick a different path or remove it first."
+        )
+    parent = os.path.dirname(target) or "."
+    if not os.path.isdir(parent):
+        raise ValueError(
+            f"parent directory of {output_file!r} does not exist "
+            f"({parent!r}). Create it first or pick a different path."
+        )
+    return parent, os.path.basename(target)
+
+
 # ---- Click commands ----
 
 
@@ -306,12 +344,15 @@ def cmd_send(
     help="Override Nostr relay URLs (may be repeated).",
 )
 @click.option(
-    "--output-dir",
-    "output_dir",
-    type=click.Path(file_okay=False),
+    "-o",
+    "--output-file",
+    "output_file",
+    type=click.Path(),
     default=None,
-    help="Where to save the received file "
-    "(default: ~/Downloads if it exists, else current dir).",
+    help="Where to save the received file. If PATH is an existing "
+    "directory, save into it using the sender's filename. Otherwise "
+    "treat PATH as the full target path (rename-on-receive). Default: "
+    "~/Downloads if it exists, else the current directory.",
 )
 @click.option(
     "--verify",
@@ -351,7 +392,7 @@ def cmd_receive(
     code,
     auto_accept,
     relays,
-    output_dir,
+    output_file,
     verify,
     hide_progress,
     allocate,
@@ -378,15 +419,13 @@ def cmd_receive(
     if code_length is None:
         code_length = 3  # match cmd_send's default
     relay_list = list(relays) if relays else None
-    if output_dir is None:
-        output_dir = _default_output_dir()
     react(
         _run_receive,
         (
             code,
             auto_accept,
             relay_list,
-            output_dir,
+            output_file,
             verify,
             hide_progress,
             allocate,
@@ -940,7 +979,7 @@ def _run_receive(
     code,
     auto_accept,
     relays,
-    output_dir,
+    output_file,
     verify,
     hide_progress,
     allocate,
@@ -949,23 +988,21 @@ def _run_receive(
 ):
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
-        # B2: resolve output_dir via realpath so a symlinked output_dir
-        # can't direct writes to an unintended location, and verify it's
-        # actually a directory we can use.
-        try:
-            output_dir_real = os.path.realpath(output_dir)
-            if not os.path.isdir(output_dir_real):
-                click.echo(
-                    f"Error: --output-dir {output_dir!r} is not a directory", err=True
-                )
+        # Validate --output-file shape up front so a typo'd path errors
+        # BEFORE the user types a code. We can't fully resolve yet —
+        # rename mode needs the sender's basename to know whether the
+        # final target collides — so defer the (parent, final_name)
+        # split until after parse_offer.
+        if output_file is not None:
+            try:
+                # In directory-or-rename mode, ask the resolver with a
+                # placeholder filename. It'll error on missing parents
+                # or existing-non-dir collisions; for collision detection
+                # against the actual sender name we re-run after parse.
+                _resolve_output_target(output_file, "_probe")
+            except ValueError as e:
+                click.echo(f"Error: {e}", err=True)
                 sys.exit(1)
-        except OSError as e:
-            click.echo(f"Error: cannot resolve --output-dir: {e}", err=True)
-            sys.exit(1)
-
-        # B4: sweep any orphan .tmp meta files left from prior crashes,
-        # so they don't accumulate over time.
-        R.cleanup_orphan_tmp_files(output_dir_real)
 
         # Three code-resolution paths:
         # 1. --allocate: takeit picks a code, prints it; sender types it
@@ -1034,24 +1071,58 @@ def _run_receive(
             return
 
         if offer["kind"] == P.KIND_FILE:
-            display_name = offer["filename"]
-            click.echo(f"Offered: {display_name} ({_pretty_size(offer['size'])})")
-            dest_path = os.path.join(output_dir_real, display_name)
+            sender_name = offer["filename"]
+            try:
+                parent_real, final_name = _resolve_output_target(
+                    output_file, sender_name
+                )
+                parent_real = os.path.realpath(parent_real)
+            except ValueError as e:
+                click.echo(f"Error: {e}", err=True)
+                w.send_message(
+                    P.encode_message(P.build_answer(False, "bad output target"))
+                )
+                yield w.close()
+                sys.exit(1)
+            display_name = sender_name
+            offered = f"Offered: {display_name} ({_pretty_size(offer['size'])})"
+            if final_name != sender_name:
+                offered += f" → saving as {final_name}"
+            click.echo(offered)
+            dest_path = os.path.join(parent_real, final_name)
             partial_path, meta_path = R.receiver_paths(dest_path)
         else:  # KIND_DIRECTORY
-            display_name = offer["dir_name"]
-            click.echo(
+            sender_name = offer["dir_name"]
+            try:
+                parent_real, final_name = _resolve_output_target(
+                    output_file, sender_name
+                )
+                parent_real = os.path.realpath(parent_real)
+            except ValueError as e:
+                click.echo(f"Error: {e}", err=True)
+                w.send_message(
+                    P.encode_message(P.build_answer(False, "bad output target"))
+                )
+                yield w.close()
+                sys.exit(1)
+            display_name = sender_name
+            offered = (
                 f"Offered: {display_name}/ "
                 f"({offer['num_files']} files, "
                 f"{_pretty_size(offer['num_bytes'])} → "
                 f"{_pretty_size(offer['size'])} zipped)"
             )
+            if final_name != sender_name:
+                offered += f" → extracting as {final_name}/"
+            click.echo(offered)
             # The "dest path" for finalization is the directory itself.
             # The partial-and-meta sidecars hang off a sibling .zip path
             # so they don't collide with anything inside the final dir.
-            dest_path = os.path.join(output_dir_real, display_name)
-            zip_marker = os.path.join(output_dir_real, f"{display_name}.zip")
+            dest_path = os.path.join(parent_real, final_name)
+            zip_marker = os.path.join(parent_real, f"{final_name}.zip")
             partial_path, meta_path = R.receiver_paths(zip_marker)
+        # Sweep any orphan .tmp meta files in the resolved parent.
+        R.cleanup_orphan_tmp_files(parent_real)
 
         # A4: refuse if anything already exists at dest_path. lstat (not
         # exists) so we catch dangling symlinks too — those return False
@@ -1069,16 +1140,18 @@ def _run_receive(
         except FileNotFoundError:
             pass  # good — destination is clear
 
-        # Defense in depth: even after realpath on output_dir, ensure the
+        # Defense in depth: even after realpath on the parent, ensure the
         # resolved dest stays inside it. The filename validator already
-        # forbids separators in the offer's filename, so this is a
-        # belt-and-suspenders check.
-        if os.path.dirname(os.path.realpath(dest_path)) != output_dir_real:
-            click.echo("Error: refusing to write outside --output-dir", err=True)
+        # forbids separators in the offer's name, so this is a
+        # belt-and-suspenders check against weird interactions with
+        # symlinked parents or oddly-shaped final-name strings.
+        if os.path.dirname(os.path.realpath(dest_path)) != parent_real:
+            click.echo(
+                "Error: refusing to write outside --output-file's parent",
+                err=True,
+            )
             w.send_message(
-                P.encode_message(
-                    P.build_answer(False, "destination escapes output_dir")
-                )
+                P.encode_message(P.build_answer(False, "destination escapes parent"))
             )
             yield w.close()
             sys.exit(1)
