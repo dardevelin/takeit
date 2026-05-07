@@ -9,16 +9,19 @@ Control messages (JSON, one per app-message):
 - Receiver → Sender: ``{"answer": {"accept": true, "chunks_have": [...]}}``
   or ``{"answer": {"reject": "reason"}}``, then ``{"done": true}``
 
-Offer fields:
-    transfer_id   : str    — base64 of BLAKE2b(size||name||content)[:16]
-    filename      : str    — the destination filename (no path traversal)
-    size          : int    — total bytes
-    content_hash  : str    — base64 of BLAKE2b-256 over the entire file
-    chunk_size    : int    — bytes per chunk (default 1 MiB)
-    chunk_hashes  : list[str] — base64 BLAKE2b-256 per chunk, in order
-    app_version   : str
+Every offer carries a `kind` discriminator: "file", "directory", or "text".
+Per-kind offer shapes:
 
-Bulk format on the dilation subchannel:
+- kind="file": transfer_id, filename, size, content_hash, chunk_size,
+  chunk_hashes, app_version. Chunks stream over the dilation subchannel.
+- kind="directory": transfer_id, dir_name, size (of the deterministic-zip
+  byte stream), content_hash, chunk_size, chunk_hashes, num_files, num_bytes
+  (uncompressed totals — advisory, for receiver UX), app_version. Same bulk
+  channel; receiver expands the stream after verification.
+- kind="text": transfer_id, text (≤ MAX_TEXT_BYTES UTF-8 bytes), app_version.
+  No bulk channel — the offer IS the payload. The receiver prints it.
+
+Bulk format on the dilation subchannel (file/directory only):
     repeated frames of:
         chunk_index  (4 bytes BE)
         chunk_length (4 bytes BE)
@@ -60,6 +63,18 @@ MAX_CHUNK_COUNT = 1 << 20        # ~1M chunks (with 1 MiB chunks → 1 TiB)
 # (HFS+, APFS) accept more but limit by codepoints not bytes. We enforce
 # UTF-8 bytes ≤ 255 to be portable.
 MAX_FILENAME_BYTES = 255
+
+# Cap on inline text-mode payload. Text rides inside the wormhole control
+# message (one app-message), not the bulk subchannel. 64 KiB is well under
+# every reasonable framing limit and keeps memory bounded against a peer
+# that crafts a hostile offer.
+MAX_TEXT_BYTES = 1 << 16  # 64 KiB
+
+# Offer kinds. New kinds get added here; parse_offer rejects anything else.
+KIND_FILE = "file"
+KIND_DIRECTORY = "directory"
+KIND_TEXT = "text"
+KNOWN_KINDS = frozenset({KIND_FILE, KIND_DIRECTORY, KIND_TEXT})
 
 # Windows reserved device names (case-insensitive). On Windows these names
 # refer to devices regardless of extension — `CON.txt` opens the console.
@@ -151,26 +166,36 @@ def hash_file(path):
     return size, h.digest()
 
 
-def compute_transfer_id(size, filename, content_hash):
-    """16-byte deterministic identifier for this transfer."""
+def compute_transfer_id(kind, size, name, content_hash):
+    """16-byte deterministic identifier, scoped by kind.
+
+    Domain separation by kind ensures (file "x", directory "x") never collide.
+    Text offers use compute_text_transfer_id (no size/hash inputs).
+    """
+    if kind not in KNOWN_KINDS:
+        raise ValueError(f"unknown kind: {kind!r}")
     h = hashlib.blake2b(digest_size=TRANSFER_ID_BYTES)
+    h.update(kind.encode("ascii"))
+    h.update(b"|")
     h.update(struct.pack(">Q", size))
     h.update(b"|")
-    h.update(filename.encode("utf-8"))
+    h.update(name.encode("utf-8"))
     h.update(b"|")
     h.update(content_hash)
     return h.digest()
 
 
-def build_offer(filename, size, content_hash, chunk_hashes,
-                chunk_size=DEFAULT_CHUNK_SIZE, app_version="takeit/0.0.1"):
-    """Construct an offer dict, suitable for json.dumps + wormhole send.
+def compute_text_transfer_id(text):
+    """16-byte deterministic id for a text offer (kind-scoped, no size/hash)."""
+    h = hashlib.blake2b(digest_size=TRANSFER_ID_BYTES)
+    h.update(b"text|")
+    h.update(text.encode("utf-8"))
+    return h.digest()
 
-    `chunk_hashes` is a list of 32-byte BLAKE2b-256 digests, one per chunk
-    in order. The receiver uses these to verify each chunk on arrival and
-    to identify reusable chunks across resumed transfers.
-    """
-    _validate_filename(filename)
+
+def _validate_chunked_offer(size, chunk_size, chunk_hashes):
+    """Shared validation for file/directory offers (both stream chunked
+    payloads). Mutates nothing; raises ValueError on any issue."""
     if size < 0:
         raise ValueError(f"negative size: {size}")
     if size > MAX_OFFER_SIZE:
@@ -189,9 +214,23 @@ def build_offer(filename, size, content_hash, chunk_hashes,
     for ch in chunk_hashes:
         if not isinstance(ch, (bytes, bytearray)) or len(ch) != 32:
             raise ValueError("each chunk hash must be 32 bytes")
-    transfer_id = compute_transfer_id(size, filename, content_hash)
+
+
+def build_offer_file(filename, size, content_hash, chunk_hashes,
+                     chunk_size=DEFAULT_CHUNK_SIZE,
+                     app_version="takeit/0.0.1"):
+    """Build a `kind="file"` offer.
+
+    `chunk_hashes` is a list of 32-byte BLAKE2b-256 digests, one per chunk
+    in order. The receiver uses these to verify each chunk on arrival and
+    to identify reusable chunks across resumed transfers.
+    """
+    _validate_filename(filename)
+    _validate_chunked_offer(size, chunk_size, chunk_hashes)
+    transfer_id = compute_transfer_id(KIND_FILE, size, filename, content_hash)
     return {
         "offer": {
+            "kind": KIND_FILE,
             "transfer_id": base64.b64encode(transfer_id).decode("ascii"),
             "filename": filename,
             "size": size,
@@ -199,6 +238,61 @@ def build_offer(filename, size, content_hash, chunk_hashes,
             "chunk_size": chunk_size,
             "chunk_hashes": [
                 base64.b64encode(h).decode("ascii") for h in chunk_hashes],
+            "app_version": app_version,
+        }
+    }
+
+
+def build_offer_directory(dir_name, size, content_hash, chunk_hashes,
+                          num_files, num_bytes,
+                          chunk_size=DEFAULT_CHUNK_SIZE,
+                          app_version="takeit/0.0.1"):
+    """Build a `kind="directory"` offer.
+
+    The chunk fields describe the deterministic-zip byte stream. `num_files`
+    and `num_bytes` are advisory totals over the uncompressed source tree —
+    the receiver shows them in the accept prompt so the user knows what they
+    are agreeing to before any bytes move.
+    """
+    _validate_filename(dir_name)  # same rules apply: NUL, traversal, length
+    _validate_chunked_offer(size, chunk_size, chunk_hashes)
+    if not isinstance(num_files, int) or num_files < 0:
+        raise ValueError(f"num_files must be a non-negative int: {num_files!r}")
+    if not isinstance(num_bytes, int) or num_bytes < 0:
+        raise ValueError(f"num_bytes must be a non-negative int: {num_bytes!r}")
+    transfer_id = compute_transfer_id(
+        KIND_DIRECTORY, size, dir_name, content_hash)
+    return {
+        "offer": {
+            "kind": KIND_DIRECTORY,
+            "transfer_id": base64.b64encode(transfer_id).decode("ascii"),
+            "dir_name": dir_name,
+            "size": size,
+            "content_hash": base64.b64encode(content_hash).decode("ascii"),
+            "chunk_size": chunk_size,
+            "chunk_hashes": [
+                base64.b64encode(h).decode("ascii") for h in chunk_hashes],
+            "num_files": num_files,
+            "num_bytes": num_bytes,
+            "app_version": app_version,
+        }
+    }
+
+
+def build_offer_text(text, app_version="takeit/0.0.1"):
+    """Build a `kind="text"` offer. The text rides inside the offer message
+    itself; there's no chunked payload."""
+    if not isinstance(text, str):
+        raise ValueError(f"text must be str, got {type(text).__name__}")
+    if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+        raise ValueError(
+            f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+    transfer_id = compute_text_transfer_id(text)
+    return {
+        "offer": {
+            "kind": KIND_TEXT,
+            "transfer_id": base64.b64encode(transfer_id).decode("ascii"),
+            "text": text,
             "app_version": app_version,
         }
     }
@@ -214,20 +308,63 @@ def expected_chunk_count(size, chunk_size):
 def parse_offer(payload):
     """Parse an inbound app-message; return the inner offer dict.
 
+    Dispatches on the `kind` field: file, directory, or text.
     Raises ProtocolError if the message is malformed or not an offer.
     """
     msg = _decode(payload)
     if not isinstance(msg, dict) or "offer" not in msg:
         raise ProtocolError("expected an 'offer' message")
     o = msg["offer"]
-    for field in ("transfer_id", "filename", "size", "content_hash",
-                  "chunk_size", "chunk_hashes"):
+    if "kind" not in o:
+        raise ProtocolError("offer missing 'kind'")
+    kind = o["kind"]
+    if kind not in KNOWN_KINDS:
+        raise ProtocolError(f"unknown offer kind: {kind!r}")
+    # Every kind carries transfer_id; decode once here.
+    if "transfer_id" not in o:
+        raise ProtocolError("offer missing 'transfer_id'")
+    try:
+        o["_transfer_id_bytes"] = base64.b64decode(o["transfer_id"])
+    except Exception as e:
+        raise ProtocolError(f"bad base64 in transfer_id: {e}")
+    if len(o["_transfer_id_bytes"]) != TRANSFER_ID_BYTES:
+        raise ProtocolError("transfer_id must be 16 bytes")
+    if kind == KIND_FILE:
+        _parse_chunked_offer(o, name_field="filename")
+    elif kind == KIND_DIRECTORY:
+        _parse_chunked_offer(o, name_field="dir_name")
+        for field in ("num_files", "num_bytes"):
+            if field not in o:
+                raise ProtocolError(f"offer missing {field!r}")
+            if not isinstance(o[field], int) or o[field] < 0:
+                raise ProtocolError(f"{field} must be a non-negative int")
+        # Reject filename on a directory offer to prevent wire confusion.
+        if "filename" in o:
+            raise ProtocolError(
+                "directory offer must not carry 'filename'; use 'dir_name'")
+    elif kind == KIND_TEXT:
+        if "text" not in o:
+            raise ProtocolError("text offer missing 'text'")
+        if not isinstance(o["text"], str):
+            raise ProtocolError("text must be str")
+        if len(o["text"].encode("utf-8")) > MAX_TEXT_BYTES:
+            raise ProtocolError(
+                f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+    return o
+
+
+def _parse_chunked_offer(o, name_field):
+    """Validate the shared chunked-stream fields shared by file and directory
+    offers. `name_field` is "filename" for file offers and "dir_name" for
+    directory offers; both have identical hardening."""
+    for field in (name_field, "size", "content_hash", "chunk_size",
+                  "chunk_hashes"):
         if field not in o:
             raise ProtocolError(f"offer missing {field!r}")
-    if not isinstance(o["filename"], str):
-        raise ProtocolError("filename must be str")
+    if not isinstance(o[name_field], str):
+        raise ProtocolError(f"{name_field} must be str")
     try:
-        _validate_filename(o["filename"])
+        _validate_filename(o[name_field])
     except ValueError as e:
         raise ProtocolError(str(e))
     if not isinstance(o["size"], int) or o["size"] < 0:
@@ -252,14 +389,11 @@ def parse_offer(payload):
             f"expected chunk count {expected_count} exceeds max "
             f"{MAX_CHUNK_COUNT}")
     try:
-        o["_transfer_id_bytes"] = base64.b64decode(o["transfer_id"])
         o["_content_hash_bytes"] = base64.b64decode(o["content_hash"])
         o["_chunk_hashes_bytes"] = [
             base64.b64decode(h) for h in o["chunk_hashes"]]
     except Exception as e:
         raise ProtocolError(f"bad base64 in offer: {e}")
-    if len(o["_transfer_id_bytes"]) != TRANSFER_ID_BYTES:
-        raise ProtocolError("transfer_id must be 16 bytes")
     if len(o["_content_hash_bytes"]) != 32:
         raise ProtocolError("content_hash must be 32 bytes (BLAKE2b-256)")
     if len(o["_chunk_hashes_bytes"]) != expected_count:
@@ -269,7 +403,6 @@ def parse_offer(payload):
     for h in o["_chunk_hashes_bytes"]:
         if len(h) != 32:
             raise ProtocolError("each chunk hash must be 32 bytes")
-    return o
 
 
 def build_answer(accept, reject_reason=None, chunks_have=None):

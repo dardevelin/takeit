@@ -15,8 +15,9 @@ import pytest
 
 from takeit.cli._protocol import (
     DEFAULT_CHUNK_SIZE, FrameDecoder, MAX_CHUNK_COUNT, MAX_FILENAME_BYTES,
-    MAX_OFFER_SIZE, ProtocolError, SUBCHANNEL_NAME, TRANSFER_ID_BYTES,
-    build_answer, build_complete, build_done, build_offer,
+    MAX_OFFER_SIZE, MAX_TEXT_BYTES, ProtocolError, SUBCHANNEL_NAME,
+    TRANSFER_ID_BYTES, build_answer, build_complete, build_done,
+    build_offer_directory, build_offer_file, build_offer_text,
     chunk_hashes_for_file, compute_transfer_id, encode_message,
     expected_chunk_count, frame, hash_file, parse_answer, parse_offer,
     parse_simple_flag, verify_chunk,
@@ -100,19 +101,22 @@ def test_verify_chunk():
 
 def test_transfer_id_is_deterministic():
     h = b"\x00" * 32
-    a = compute_transfer_id(100, "file.txt", h)
-    b = compute_transfer_id(100, "file.txt", h)
+    a = compute_transfer_id("file", 100, "file.txt", h)
+    b = compute_transfer_id("file", 100, "file.txt", h)
     assert a == b
     assert len(a) == TRANSFER_ID_BYTES
 
 
-def test_transfer_id_changes_on_size_filename_or_hash():
+def test_transfer_id_changes_on_kind_size_name_or_hash():
     h1 = b"\x00" * 32
     h2 = b"\x01" * 32
-    base = compute_transfer_id(100, "file.txt", h1)
-    assert compute_transfer_id(101, "file.txt", h1) != base
-    assert compute_transfer_id(100, "other.txt", h1) != base
-    assert compute_transfer_id(100, "file.txt", h2) != base
+    base = compute_transfer_id("file", 100, "file.txt", h1)
+    assert compute_transfer_id("file", 101, "file.txt", h1) != base
+    assert compute_transfer_id("file", 100, "other.txt", h1) != base
+    assert compute_transfer_id("file", 100, "file.txt", h2) != base
+    # Same size/name/hash but different kind must produce different id —
+    # otherwise (file "x", directory "x") would collide.
+    assert compute_transfer_id("directory", 100, "file.txt", h1) != base
 
 
 # --- offer building ---
@@ -125,8 +129,9 @@ def test_build_offer_round_trips():
         hashlib.blake2b(payload[i:i + (1 << 20)], digest_size=32).digest()
         for i in range(0, len(payload), 1 << 20)
     ]
-    msg = build_offer("doc.pdf", len(payload), h_all, chunks)
+    msg = build_offer_file("doc.pdf", len(payload), h_all, chunks)
     parsed = parse_offer(encode_message(msg))
+    assert parsed["kind"] == "file"
     assert parsed["filename"] == "doc.pdf"
     assert parsed["size"] == len(payload)
     assert parsed["chunk_size"] == DEFAULT_CHUNK_SIZE
@@ -140,17 +145,17 @@ def test_build_offer_rejects_path_traversal():
     chunks = []
     for bad in ("a/b.txt", "..", ".", "", "x\\y"):
         with pytest.raises(ValueError):
-            build_offer(bad, 0, h, chunks)
+            build_offer_file(bad, 0, h, chunks)
 
 
 def test_build_offer_rejects_negative_size():
     with pytest.raises(ValueError):
-        build_offer("a.txt", -1, b"\x00" * 32, [])
+        build_offer_file("a.txt", -1, b"\x00" * 32, [])
 
 
 def test_build_offer_rejects_non_positive_chunk_size():
     with pytest.raises(ValueError):
-        build_offer("a.txt", 0, b"\x00" * 32, [], chunk_size=0)
+        build_offer_file("a.txt", 0, b"\x00" * 32, [], chunk_size=0)
 
 
 def test_build_offer_rejects_wrong_chunk_count():
@@ -158,13 +163,13 @@ def test_build_offer_rejects_wrong_chunk_count():
     h = b"\x00" * 32
     # Size 100, chunk_size 50 = 2 chunks needed
     with pytest.raises(ValueError, match="chunk_hashes count"):
-        build_offer("a.txt", 100, h, [b"\x00" * 32], chunk_size=50)
+        build_offer_file("a.txt", 100, h, [b"\x00" * 32], chunk_size=50)
 
 
 def test_build_offer_rejects_bad_chunk_hash_size():
     h = b"\x00" * 32
     with pytest.raises(ValueError, match="32 bytes"):
-        build_offer("a.txt", 1, h, [b"\x00" * 16])
+        build_offer_file("a.txt", 1, h, [b"\x00" * 16])
 
 
 # --- offer parsing ---
@@ -182,6 +187,7 @@ def _serializable_offer(size=1, chunk_size=1024, filename="a.txt",
         n = expected_chunk_count(size, chunk_size)
         chunk_hashes_bytes = [b"\x00" * 32 for _ in range(n)]
     return json.dumps({"offer": {
+        "kind": "file",
         "transfer_id": base64.b64encode(transfer_id_bytes).decode(),
         "filename": filename,
         "size": size,
@@ -208,7 +214,7 @@ def test_parse_offer_rejects_wrong_envelope():
 
 
 def test_parse_offer_rejects_missing_field():
-    minimal = json.dumps({"offer": {"filename": "a"}}).encode()
+    minimal = json.dumps({"offer": {"kind": "file", "filename": "a"}}).encode()
     with pytest.raises(ProtocolError, match="missing"):
         parse_offer(minimal)
 
@@ -362,7 +368,7 @@ def test_build_offer_rejects_oversized_size():
     """Sender refuses to advertise files above MAX_OFFER_SIZE."""
     h = b"\x00" * 32
     with pytest.raises(ValueError, match="exceeds max"):
-        build_offer("a.txt", MAX_OFFER_SIZE + 1, h, [])
+        build_offer_file("a.txt", MAX_OFFER_SIZE + 1, h, [])
 
 
 def test_parse_offer_rejects_oversized_size():
@@ -371,6 +377,7 @@ def test_parse_offer_rejects_oversized_size():
     h_b64 = base64.b64encode(b"\x00" * 32).decode()
     tid_b64 = base64.b64encode(b"\x00" * 16).decode()
     msg = json.dumps({"offer": {
+        "kind": "file",
         "transfer_id": tid_b64,
         "filename": "a.txt",
         "size": MAX_OFFER_SIZE + 1,
@@ -390,6 +397,7 @@ def test_parse_offer_rejects_too_many_chunk_hashes_pre_decode():
     tid_b64 = base64.b64encode(b"\x00" * 16).decode()
     bogus_hash_b64 = base64.b64encode(b"\x00" * 32).decode()
     msg = json.dumps({"offer": {
+        "kind": "file",
         "transfer_id": tid_b64,
         "filename": "a.txt",
         "size": 1024,
@@ -407,6 +415,7 @@ def test_parse_offer_rejects_implied_chunk_count_overflow():
     h_b64 = base64.b64encode(b"\x00" * 32).decode()
     tid_b64 = base64.b64encode(b"\x00" * 16).decode()
     msg = json.dumps({"offer": {
+        "kind": "file",
         "transfer_id": tid_b64,
         "filename": "a.txt",
         "size": 1 << 30,  # 1 GiB
@@ -423,7 +432,7 @@ def test_offer_at_max_size_with_max_chunks_accepted():
     the chunk count equals MAX_CHUNK_COUNT must be accepted."""
     chunk_size = MAX_OFFER_SIZE // MAX_CHUNK_COUNT  # exactly MAX_CHUNK_COUNT chunks
     chunks = [b"\x00" * 32] * MAX_CHUNK_COUNT
-    msg = build_offer("big.bin", MAX_OFFER_SIZE,
+    msg = build_offer_file("big.bin", MAX_OFFER_SIZE,
                       b"\x00" * 32, chunks, chunk_size=chunk_size)
     parsed = parse_offer(encode_message(msg))
     assert parsed["size"] == MAX_OFFER_SIZE
@@ -438,6 +447,7 @@ def _make_offer_with_filename(filename):
     h_b64 = base64.b64encode(b"\x00" * 32).decode()
     tid_b64 = base64.b64encode(b"\x00" * 16).decode()
     return json.dumps({"offer": {
+        "kind": "file",
         "transfer_id": tid_b64,
         "filename": filename,
         "size": 0,
@@ -504,4 +514,203 @@ def test_build_offer_rejects_same_filenames_as_parse():
     for bad in ("CON", "auth.log\x00.txt", "trailing.",
                 "a" * (MAX_FILENAME_BYTES + 1), "hello‮evil"):
         with pytest.raises(ValueError):
-            build_offer(bad, 0, b"\x00" * 32, [])
+            build_offer_file(bad, 0, b"\x00" * 32, [])
+
+
+# --- HYP-387: kind discriminator + per-kind builders ---
+
+
+def test_parse_offer_rejects_missing_kind():
+    """Every offer MUST carry a `kind` field. takeit owns both ends of the
+    wire — there are no legacy peers to be lenient with."""
+    h_b64 = base64.b64encode(b"\x00" * 32).decode()
+    tid_b64 = base64.b64encode(b"\x00" * 16).decode()
+    msg = json.dumps({"offer": {
+        # no "kind"
+        "transfer_id": tid_b64,
+        "filename": "a.txt",
+        "size": 0,
+        "content_hash": h_b64,
+        "chunk_size": 1024,
+        "chunk_hashes": [],
+    }}).encode()
+    with pytest.raises(ProtocolError, match="kind"):
+        parse_offer(msg)
+
+
+def test_parse_offer_rejects_unknown_kind():
+    """Unknown kinds are a forward-compat trap: we'd rather refuse loudly
+    than silently misinterpret a future format."""
+    h_b64 = base64.b64encode(b"\x00" * 32).decode()
+    tid_b64 = base64.b64encode(b"\x00" * 16).decode()
+    msg = json.dumps({"offer": {
+        "kind": "stream",  # not a recognized kind
+        "transfer_id": tid_b64,
+        "filename": "a.txt",
+        "size": 0,
+        "content_hash": h_b64,
+        "chunk_size": 1024,
+        "chunk_hashes": [],
+    }}).encode()
+    with pytest.raises(ProtocolError, match="kind"):
+        parse_offer(msg)
+
+
+def test_build_offer_file_emits_kind_field():
+    msg = build_offer_file("a.txt", 0, b"\x00" * 32, [])
+    assert msg["offer"]["kind"] == "file"
+
+
+# --- directory kind ---
+
+
+def test_build_offer_directory_round_trips():
+    """Directory offers carry dir_name + the deterministic-zip stream's
+    size/content_hash/chunk_hashes, plus advisory num_files/num_bytes."""
+    payload = b"a" * 1_500_000  # the streamed-zip bytes
+    h_all = hashlib.blake2b(payload, digest_size=32).digest()
+    chunks = [
+        hashlib.blake2b(payload[i:i + (1 << 20)], digest_size=32).digest()
+        for i in range(0, len(payload), 1 << 20)
+    ]
+    msg = build_offer_directory(
+        "my_project", len(payload), h_all, chunks,
+        num_files=23, num_bytes=14_300_000)
+    parsed = parse_offer(encode_message(msg))
+    assert parsed["kind"] == "directory"
+    assert parsed["dir_name"] == "my_project"
+    assert parsed["size"] == len(payload)
+    assert parsed["num_files"] == 23
+    assert parsed["num_bytes"] == 14_300_000
+    assert parsed["_chunk_hashes_bytes"] == chunks
+
+
+def test_build_offer_directory_rejects_path_traversal_in_dir_name():
+    h = b"\x00" * 32
+    for bad in ("a/b", "..", ".", "", "x\\y", "CON", ".hidden"):
+        with pytest.raises(ValueError):
+            build_offer_directory(bad, 0, h, [], num_files=0, num_bytes=0)
+
+
+def test_build_offer_directory_rejects_negative_num_files_or_num_bytes():
+    h = b"\x00" * 32
+    with pytest.raises(ValueError):
+        build_offer_directory("ok", 0, h, [], num_files=-1, num_bytes=0)
+    with pytest.raises(ValueError):
+        build_offer_directory("ok", 0, h, [], num_files=0, num_bytes=-1)
+
+
+def test_parse_offer_directory_rejects_missing_num_files():
+    h_b64 = base64.b64encode(b"\x00" * 32).decode()
+    tid_b64 = base64.b64encode(b"\x00" * 16).decode()
+    msg = json.dumps({"offer": {
+        "kind": "directory",
+        "transfer_id": tid_b64,
+        "dir_name": "my_project",
+        "size": 0,
+        "content_hash": h_b64,
+        "chunk_size": 1024,
+        "chunk_hashes": [],
+        # no num_files / num_bytes
+    }}).encode()
+    with pytest.raises(ProtocolError, match="num_files|missing"):
+        parse_offer(msg)
+
+
+def test_parse_offer_directory_rejects_filename_field():
+    """A directory offer must use dir_name; receiving a `filename` field
+    is a wire confusion — refuse rather than silently pick one."""
+    h_b64 = base64.b64encode(b"\x00" * 32).decode()
+    tid_b64 = base64.b64encode(b"\x00" * 16).decode()
+    msg = json.dumps({"offer": {
+        "kind": "directory",
+        "transfer_id": tid_b64,
+        "filename": "wrong-field-for-dir",
+        "size": 0,
+        "content_hash": h_b64,
+        "chunk_size": 1024,
+        "chunk_hashes": [],
+        "num_files": 0,
+        "num_bytes": 0,
+    }}).encode()
+    with pytest.raises(ProtocolError):
+        parse_offer(msg)
+
+
+# --- text kind ---
+
+
+def test_build_offer_text_round_trips():
+    msg = build_offer_text("hello world")
+    parsed = parse_offer(encode_message(msg))
+    assert parsed["kind"] == "text"
+    assert parsed["text"] == "hello world"
+    # transfer_id still present and 16 bytes for consistency
+    assert len(parsed["_transfer_id_bytes"]) == TRANSFER_ID_BYTES
+
+
+def test_build_offer_text_rejects_non_string():
+    with pytest.raises(ValueError):
+        build_offer_text(b"bytes-not-str")  # noqa
+
+
+def test_build_offer_text_rejects_oversized():
+    """Text offers ride inside the wormhole control message — cap at
+    MAX_TEXT_BYTES UTF-8 bytes to stay well under the layer's payload
+    limit and bound memory."""
+    too_big = "x" * (MAX_TEXT_BYTES + 1)
+    with pytest.raises(ValueError, match="exceeds"):
+        build_offer_text(too_big)
+
+
+def test_build_offer_text_accepts_at_max():
+    fn = "x" * MAX_TEXT_BYTES
+    msg = build_offer_text(fn)
+    parsed = parse_offer(encode_message(msg))
+    assert parsed["text"] == fn
+
+
+def test_parse_offer_text_rejects_oversized():
+    """Receiver enforces the same cap, regardless of what a peer sends."""
+    big = "x" * (MAX_TEXT_BYTES + 1)
+    msg = json.dumps({"offer": {
+        "kind": "text",
+        "transfer_id": base64.b64encode(b"\x00" * 16).decode(),
+        "text": big,
+    }}).encode()
+    with pytest.raises(ProtocolError, match="exceeds"):
+        parse_offer(msg)
+
+
+def test_parse_offer_text_rejects_missing_text():
+    msg = json.dumps({"offer": {
+        "kind": "text",
+        "transfer_id": base64.b64encode(b"\x00" * 16).decode(),
+        # no "text"
+    }}).encode()
+    with pytest.raises(ProtocolError, match="text|missing"):
+        parse_offer(msg)
+
+
+def test_parse_offer_text_rejects_non_string_text():
+    msg = json.dumps({"offer": {
+        "kind": "text",
+        "transfer_id": base64.b64encode(b"\x00" * 16).decode(),
+        "text": 123,
+    }}).encode()
+    with pytest.raises(ProtocolError, match="text"):
+        parse_offer(msg)
+
+
+def test_text_offer_does_not_carry_chunk_fields():
+    """A text offer has no chunks — the wire format must not require them.
+    A receiver that sees `chunk_hashes` on a text offer should still
+    accept (forward-compat ignore) but the canonical builder MUST NOT
+    emit them."""
+    msg = build_offer_text("hi")
+    o = msg["offer"]
+    assert "chunk_hashes" not in o
+    assert "chunk_size" not in o
+    assert "size" not in o
+    assert "filename" not in o
+    assert "dir_name" not in o

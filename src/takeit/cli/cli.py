@@ -264,7 +264,7 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
             _print_qr(code)
 
         # Send the offer
-        offer_msg = P.build_offer(
+        offer_msg = P.build_offer_file(
             filename, size, content_hash, chunk_hashes, chunk_size=chunk_size)
         w.send_message(P.encode_message(offer_msg))
 
@@ -501,6 +501,16 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         finally:
             spinner.stop()
         offer = P.parse_offer(offer_payload)
+        if offer["kind"] != P.KIND_FILE:
+            # Directory and text kinds are tracked separately — HYP-388
+            # (directory) and HYP-389 (text). The schema is in place but
+            # the receiver paths are not yet wired. Refuse the offer
+            # cleanly so the sender sees a useful error instead of a hang.
+            reason = f"{offer['kind']} transfer not yet supported by this client"
+            w.send_message(P.encode_message(P.build_answer(False, reason)))
+            click.echo(f"Error: {reason}", err=True)
+            yield w.close()
+            sys.exit(1)
         click.echo(
             f"Offered: {offer['filename']} ({_pretty_size(offer['size'])})")
 
