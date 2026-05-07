@@ -29,8 +29,8 @@ Saved /Users/them/Downloads/report.pdf.
 ```
 
 The code's two parts are: a long random locator (carries the routing
-tag, useless to anyone but the receiver) and a short three-word
-password. Paste it as a single string, or use `--qr` and scan it.
+tag) and a short three-word human handoff half. Paste the full string,
+or use `--qr` and scan it.
 
 The file goes from your computer to theirs, **directly**. Nothing in
 between gets a copy.
@@ -53,10 +53,10 @@ takeit send my_project/
 takeit send --text "the meeting is at 3pm"
 ```
 
-You'll see a three-word code. Tell it to the other person — say it,
-text it, paste it, scan it. Directories are streamed as a single
-deterministic zip — the receiver expands them on arrival. Text is
-inline — the receiver prints it to their terminal.
+You'll see a full code ending in three words. Tell it to the other
+person — paste it or scan it when you can. Directories are streamed as
+a single deterministic zip — the receiver expands them on arrival. Text
+is inline — the receiver prints it to their terminal.
 
 ```sh
 takeit send report.pdf --qr
@@ -119,7 +119,7 @@ where the file is going, and the next attempt resumes from them.
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |
-| `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <words>`. |
+| `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <code>`. |
 | `-t` / `--only-text` (receiver) | Refuse incoming files/directories; only accept `--text` messages. |
 | `--hide-progress` (both) | Suppress the progress bar and spinner. Auto-suppressed when stdout isn't a terminal. |
 | `--debug` | Show full error details if something goes wrong. |
@@ -146,8 +146,8 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
 
 - **The file goes directly between you and the receiver.** It does not
   pass through any server we (or anyone) operate.
-- **The connection is encrypted** with a password derived from the
-  three-word code. Someone watching the network sees ciphertext.
+- **The connection is encrypted** with a key derived from the full
+  takeit code. Someone watching the network sees ciphertext.
 - **Wrong code → no transfer.** A bad guess fails immediately and
   closes the connection. Brute-force isn't practical.
 - **Your filename and file size are also encrypted** — the relays we
@@ -159,9 +159,10 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
 
 A few honest limits:
 
-- The relay can tell *that* a transfer is happening (someone is using a
-  takeit-style code on this relay) but not *what* is being transferred,
-  *who* is involved, or *where* the file is going.
+- Relays can see network metadata: client IPs, timing, subscriptions,
+  and publishes on a takeit-style tag. They do not see the file bytes,
+  filename, file size, or inline text. Peers can also see direct
+  connection hints such as LAN or public IP candidates.
 - If both you and the receiver are behind tricky network setups
   (corporate firewalls, mobile carrier-grade NAT), the direct connection
   may fail — there's no fallback to "send through us." Try from a
@@ -198,13 +199,13 @@ await w.close()
 ```
 
 See `src/takeit/api.py` for the full surface (Deferred-mode and
-Delegate-mode wormholes, `dilate()` for bulk-data subchannels,
+Delegate-mode sessions, `dilate()` for bulk-data subchannels,
 `derive_key()` for purpose-keyed derivation, etc.).
 
 ### How it works under the hood
 
 1. The sender generates a fresh 128-bit random *locator* and a short
-   three-word password from a wordlist. The full code shown to the
+   three-word handoff half from a wordlist. The full code shown to the
    user is `<base32-locator>:<words>` (e.g.
    `nbswy3dpo5xxe3deebsxe5dpor4q:purple-sausages-mocha`).
 2. The locator (NOT the words) is fed through `HKDF-SHA256` to produce
@@ -213,9 +214,9 @@ Delegate-mode wormholes, `dilate()` for bulk-data subchannels,
    random bits, a relay cannot brute-force it the way it could with
    short words alone.
 3. The peers run **SPAKE2** over a small handful of ephemeral Nostr
-   events, using the words as the password, producing a shared secret.
-   SPAKE2's online-only-one-guess property keeps the words safe even
-   though they're short.
+   events, using the full code as the PAKE input, producing a shared
+   secret. In legacy words-only mode, the words-only string is the PAKE
+   input and `--verify` is mandatory.
 4. They exchange direct connection candidates (LAN addresses +
    STUN-derived public IPs) and open a direct, **Noise**-encrypted,
    multiplexed TCP connection.
@@ -259,8 +260,8 @@ resume logic, security defenses, and CLI behavior. See
 - **Words-only handoff requires `--verify`.** Default takeit codes are
   `<long-random-locator>:<short-words>` and are MITM-resistant out of
   the box. If you handed off ONLY the words (no QR / no full code),
-  takeit will print a warning — you MUST use `--verify` on both sides
-  and compare the authentication string out-of-band, otherwise a
+  takeit refuses to proceed unless you use `--verify` on both sides
+  and compare the authentication string out-of-band. Without that, a
   hostile Nostr relay could intercept the transfer.
 - **NAT traversal is direct-only.** Symmetric NATs without a
   port-forward will fail; no transit-relay fallback.
