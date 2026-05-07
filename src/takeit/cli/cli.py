@@ -8,6 +8,7 @@ and resume sidecar files in `takeit.cli._resume`. This module is the
 Twisted + Click glue that wires it to a real wormhole + dilation transport.
 """
 import os
+import shutil
 import sys
 
 import click
@@ -22,6 +23,7 @@ import takeit
 from takeit.cli import _protocol as P
 from takeit.cli import _resume as R
 from takeit.cli import _spinner as Sp
+from takeit.cli import _zipstream as Z
 from takeit.errors import KeyFormatError, WrongPasswordError
 
 
@@ -125,7 +127,7 @@ def main(ctx, debug):
 
 
 @main.command("send")
-@click.argument("path", type=click.Path(exists=True, dir_okay=False,
+@click.argument("path", type=click.Path(exists=True, dir_okay=True,
                                         readable=True, resolve_path=True))
 @click.option("--code-length", type=int, default=3,
               help="Number of words in the generated code (default: 3).")
@@ -140,7 +142,11 @@ def main(ctx, debug):
                    "(useful for hand-off to a phone).")
 @click.pass_context
 def cmd_send(ctx, path, code_length, relays, explicit_code, no_cache, qr):
-    """Send a file."""
+    """Send a file or directory.
+
+    Directories are streamed as a deterministic zip — the receiver
+    expands them on arrival. Resume works for both kinds.
+    """
     relay_list = list(relays) if relays else None
     react(_run_send, (path, code_length, relay_list, explicit_code,
                       not no_cache, qr, ctx.obj.get("debug", False)))
@@ -225,9 +231,44 @@ def _handle_cli_error(exc, debug):
 @inlineCallbacks
 def _run_send(reactor, path, code_length, relays, explicit_code,
               use_cache, qr, debug):
+    chunk_size = P.DEFAULT_CHUNK_SIZE
+    is_dir = os.path.isdir(path)
+
+    if is_dir:
+        # Directory transfer: stream the source through a deterministic
+        # zip into a temp file, hashing as we go. The temp file then
+        # plays the role of "the file" for the rest of the send flow:
+        # chunk-indexed reads, resume, etc. Sender cache is skipped —
+        # zipping is fast enough relative to the transfer that re-doing
+        # it on retry is cheaper than persisting a sidecar that may
+        # disagree with the source tree the user has since edited.
+        dir_name = os.path.basename(os.path.normpath(path))
+        click.echo(f"Preparing {dir_name}/ ...")
+        _files, num_files, num_bytes = Z.walk_directory(path)
+        # Hold the temp zip alongside the source dir so it's on the same
+        # filesystem (avoids ENOSPC surprises in /tmp on small partitions).
+        tmp_zip_path = os.path.join(
+            os.path.dirname(os.path.abspath(path)),
+            f".{dir_name}.takeit-zip-{os.getpid()}")
+        try:
+            size, content_hash, chunk_hashes = yield deferToThread(
+                Z.materialize_and_hash, path, tmp_zip_path, chunk_size)
+            yield _do_send(
+                reactor, tmp_zip_path, dir_name, size, content_hash,
+                chunk_hashes, chunk_size, code_length, relays,
+                explicit_code, qr, debug,
+                kind=P.KIND_DIRECTORY,
+                num_files=num_files, num_bytes=num_bytes)
+        finally:
+            try:
+                os.unlink(tmp_zip_path)
+            except FileNotFoundError:
+                pass
+        return
+
+    # File transfer: original path.
     filename = os.path.basename(path)
     cache_path = R.sender_cache_path(path)
-    chunk_size = P.DEFAULT_CHUNK_SIZE
 
     # Load cached hashes if the file is unchanged; otherwise compute fresh.
     cache = R.load_sender_cache(cache_path, path) if use_cache else None
@@ -250,6 +291,20 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
                 content_hash_b64=R.b64(content_hash),
                 chunk_hashes_b64=[R.b64(h) for h in chunk_hashes])
 
+    yield _do_send(
+        reactor, path, filename, size, content_hash, chunk_hashes,
+        chunk_size, code_length, relays, explicit_code, qr, debug,
+        kind=P.KIND_FILE)
+
+
+@inlineCallbacks
+def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
+             chunk_size, code_length, relays, explicit_code, qr, debug,
+             *, kind, num_files=None, num_bytes=None):
+    """Common send flow once the payload is hashed. `payload_path` is the
+    file on disk to chunk-stream (the source file for KIND_FILE, the
+    materialized temp zip for KIND_DIRECTORY). `name` is the user-facing
+    name (filename or dir_name) embedded in the offer."""
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         if explicit_code:
@@ -263,9 +318,18 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         if qr:
             _print_qr(code)
 
-        # Send the offer
-        offer_msg = P.build_offer_file(
-            filename, size, content_hash, chunk_hashes, chunk_size=chunk_size)
+        # Send the offer (per-kind shape).
+        if kind == P.KIND_FILE:
+            offer_msg = P.build_offer_file(
+                name, size, content_hash, chunk_hashes,
+                chunk_size=chunk_size)
+        elif kind == P.KIND_DIRECTORY:
+            offer_msg = P.build_offer_directory(
+                name, size, content_hash, chunk_hashes,
+                num_files=num_files, num_bytes=num_bytes,
+                chunk_size=chunk_size)
+        else:
+            raise AssertionError(f"unsupported send kind: {kind!r}")
         w.send_message(P.encode_message(offer_msg))
 
         # Wait for the answer (which may include resumed chunk indices).
@@ -302,7 +366,12 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
             ep = dw.connector_for(P.SUBCHANNEL_NAME)
         finally:
             spinner.stop()
-        click.echo(f"Sending {filename} ({_pretty_size(size)})...")
+        if kind == P.KIND_DIRECTORY:
+            click.echo(
+                f"Sending {name}/ ({num_files} files, "
+                f"{_pretty_size(num_bytes)} → {_pretty_size(size)} zipped)...")
+        else:
+            click.echo(f"Sending {name} ({_pretty_size(size)})...")
         # Bytes to send = sum of remaining chunk sizes. The last chunk may
         # be short — compute against actual sizes, not chunk_size * count.
         bytes_to_send = sum(
@@ -310,7 +379,7 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         progress = _make_progress_bar(bytes_to_send, desc="sending")
         try:
             yield _send_chunks_over_subchannel(
-                reactor, ep, path, chunk_size, chunks_to_send,
+                reactor, ep, payload_path, chunk_size, chunks_to_send,
                 progress=progress)
         finally:
             progress.close()
@@ -450,6 +519,17 @@ def _read_chunk(fh, idx, chunk_size):
     return fh.read(chunk_size)
 
 
+def _rmtree_quiet(path):
+    """Best-effort recursive remove. Used when a directory transfer is
+    aborted mid-extract — leaving a half-populated tempdir behind would
+    confuse the user, but propagating the cleanup error would mask the
+    real failure that triggered cleanup."""
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
+
+
 # ---- Receive flow ----
 
 
@@ -501,21 +581,36 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         finally:
             spinner.stop()
         offer = P.parse_offer(offer_payload)
-        if offer["kind"] != P.KIND_FILE:
-            # Directory and text kinds are tracked separately — HYP-388
-            # (directory) and HYP-389 (text). The schema is in place but
-            # the receiver paths are not yet wired. Refuse the offer
-            # cleanly so the sender sees a useful error instead of a hang.
+        if offer["kind"] not in (P.KIND_FILE, P.KIND_DIRECTORY):
+            # Text mode is tracked separately — HYP-389. Schema is in
+            # place; receiver path is not yet wired. Refuse cleanly so
+            # the sender sees a useful error instead of a hang.
             reason = f"{offer['kind']} transfer not yet supported by this client"
             w.send_message(P.encode_message(P.build_answer(False, reason)))
             click.echo(f"Error: {reason}", err=True)
             yield w.close()
             sys.exit(1)
-        click.echo(
-            f"Offered: {offer['filename']} ({_pretty_size(offer['size'])})")
 
-        dest_path = os.path.join(output_dir_real, offer["filename"])
-        partial_path, meta_path = R.receiver_paths(dest_path)
+        if offer["kind"] == P.KIND_FILE:
+            display_name = offer["filename"]
+            click.echo(
+                f"Offered: {display_name} ({_pretty_size(offer['size'])})")
+            dest_path = os.path.join(output_dir_real, display_name)
+            partial_path, meta_path = R.receiver_paths(dest_path)
+        else:  # KIND_DIRECTORY
+            display_name = offer["dir_name"]
+            click.echo(
+                f"Offered: {display_name}/ "
+                f"({offer['num_files']} files, "
+                f"{_pretty_size(offer['num_bytes'])} → "
+                f"{_pretty_size(offer['size'])} zipped)")
+            # The "dest path" for finalization is the directory itself.
+            # The partial-and-meta sidecars hang off a sibling .zip path
+            # so they don't collide with anything inside the final dir.
+            dest_path = os.path.join(output_dir_real, display_name)
+            zip_marker = os.path.join(
+                output_dir_real, f"{display_name}.zip")
+            partial_path, meta_path = R.receiver_paths(zip_marker)
 
         # A4: refuse if anything already exists at dest_path. lstat (not
         # exists) so we catch dangling symlinks too — those return False
@@ -634,20 +729,48 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             yield w.close()
             sys.exit(1)
 
-        # A4: atomic finalize that fails closed if dest_path appeared
-        # between the lstat check and now (TOCTOU). os.link refuses with
-        # FileExistsError; we keep the partial in place and surface the
-        # race so the user can investigate rather than silently overwrite.
-        try:
-            os.link(partial_path, dest_path)
-        except FileExistsError:
-            click.echo(
-                f"Error: {dest_path} appeared during transfer; refusing to "
-                "overwrite. The verified bytes are at "
-                f"{partial_path}; rename manually if desired.", err=True)
-            yield w.close()
-            sys.exit(1)
-        os.unlink(partial_path)
+        # Finalize differs by kind. File: atomic-link the verified
+        # partial into place. Directory: extract the verified zip into
+        # a sibling tempdir, then atomic-rename the tempdir to dest.
+        if offer["kind"] == P.KIND_FILE:
+            try:
+                os.link(partial_path, dest_path)
+            except FileExistsError:
+                click.echo(
+                    f"Error: {dest_path} appeared during transfer; "
+                    "refusing to overwrite. The verified bytes are at "
+                    f"{partial_path}; rename manually if desired.",
+                    err=True)
+                yield w.close()
+                sys.exit(1)
+            os.unlink(partial_path)
+        else:  # KIND_DIRECTORY: extract zip into a tempdir, atomic-rename
+            extract_tmp = (
+                f"{dest_path}.takeit-extract-{os.getpid()}")
+            os.makedirs(extract_tmp, exist_ok=False)
+            try:
+                yield deferToThread(
+                    Z.extract_zip_safely, partial_path, extract_tmp)
+                # TOCTOU-safe atomic rename. os.rename refuses on Linux
+                # if dest_path is a non-empty directory, but on macOS it
+                # may overwrite — the lstat pre-check + this re-check
+                # cover both.
+                try:
+                    os.lstat(dest_path)
+                    click.echo(
+                        f"Error: {dest_path} appeared during transfer; "
+                        f"refusing to overwrite. Extracted bytes are at "
+                        f"{extract_tmp}.", err=True)
+                    yield w.close()
+                    sys.exit(1)
+                except FileNotFoundError:
+                    pass
+                os.rename(extract_tmp, dest_path)
+                os.unlink(partial_path)
+            except Exception:
+                # Best-effort cleanup of the half-extracted tempdir.
+                _rmtree_quiet(extract_tmp)
+                raise
         try:
             os.unlink(meta_path)
         except FileNotFoundError:
@@ -656,7 +779,7 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         complete_payload = yield w.get_message()
         P.parse_simple_flag(complete_payload, "complete")
         w.send_message(P.encode_message(P.build_done()))
-        click.echo(f"Saved {dest_path}.")
+        click.echo(f"Saved {dest_path}{'/' if offer['kind'] == P.KIND_DIRECTORY else ''}.")
         yield w.close()
     except Exception as exc:
         sys.exit(_handle_cli_error(exc, debug))

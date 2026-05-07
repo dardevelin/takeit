@@ -14,7 +14,7 @@
 
 # takeit
 
-**Send a file to someone. No accounts, no upload to a cloud, no fuss.**
+**Send a file or folder to someone. No accounts, no upload to a cloud, no fuss.**
 
 ```sh
 # you, the sender
@@ -41,14 +41,16 @@ That's it. You now have a `takeit` command. (Python 3.10 or newer.)
 
 ## Use it
 
-### Send a file
+### Send a file or directory
 
 ```sh
 takeit send report.pdf
+takeit send my_project/
 ```
 
 You'll see a three-word code. Tell it to the other person — say it,
-text it, paste it, scan it.
+text it, paste it, scan it. Directories are streamed as a single
+deterministic zip — the receiver expands them on arrival.
 
 ```sh
 takeit send report.pdf --qr
@@ -204,14 +206,17 @@ resume logic, security defenses, and CLI behavior. See
 
 ### v0.1 known limitations
 
-- **Single file at a time.** No multi-file (`takeit send a b c`) or
-  directory transfer yet.
-- **No text mode.** Files only.
+- **Multi-file send is one-shot.** `takeit send a b c` (multiple
+  positionals) is not supported — pass a directory instead.
+- **No text mode.** No `takeit send --text "msg"` yet. Same shape as
+  the file path: an offer with the text inline; small CLI work.
 - **No verifier (SAS) display.** takeit computes a short verification
   string but the CLI doesn't surface it for paranoid out-of-band
   comparison.
 - **Privacy: encrypted-offer ciphertext length leaks file size to the
-  relay (±1 MiB).**
+  relay (±1 MiB).** The encrypted offer's `chunk_hashes` list is
+  ~32 bytes per chunk; a relay operator can divide ciphertext length
+  to estimate file size to within one chunk.
 - **Privacy: the routing tag is HKDF-deterministic.** A relay operator
   can precompute every possible `(code → tag)` mapping and detect
   specific codes in use. Doesn't enable a man-in-the-middle, but it's
