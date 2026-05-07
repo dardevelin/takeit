@@ -64,8 +64,12 @@ def test_e2e_directory_transfer_round_trips(tmp_path):
     files, num_files, num_bytes = Z.walk_directory(str(src))
     size, content_hash, chunk_hashes = Z.materialize_and_hash(
         str(src), str(tmp_zip), chunk_size)
+    # chunk_hashes are no longer part of the offer (HYP-392) — they
+    # ride the dilation subchannel. We still compute them on the sender
+    # side because materialize_and_hash returns them; in real CLI flow
+    # they'd be sent via build_subchannel_header.
     offer_msg = P.build_offer_directory(
-        "src", size, content_hash, chunk_hashes,
+        "src", size, content_hash,
         num_files=num_files, num_bytes=num_bytes,
         chunk_size=chunk_size)
 
@@ -169,14 +173,7 @@ def test_e2e_directory_with_empty_subdirs(tmp_path):
 # --- offer caps still apply ---
 
 
-def test_directory_offer_uses_chunk_count_cap(tmp_path):
-    """A directory offer is subject to the same MAX_CHUNK_COUNT cap as
-    a file offer — derived from `_validate_chunked_offer` in
-    _protocol.py. Build an offer with a tiny chunk_size to hit the cap."""
-    h = b"\x00" * 32
-    huge_chunk_count = P.MAX_CHUNK_COUNT + 1
-    chunks = [b"\x00" * 32] * huge_chunk_count
-    with pytest.raises(ValueError, match="chunk count"):
-        P.build_offer_directory(
-            "ok", huge_chunk_count, h, chunks,
-            num_files=0, num_bytes=0, chunk_size=1)
+# Pre-HYP-392 a directory offer carrying too many chunk_hashes was
+# rejected here. Post-HYP-392 chunk_hashes ride the subchannel header
+# and that cap is enforced by parse_subchannel_header (see
+# tests/test_subchannel_header.py::test_parse_subchannel_header_rejects_too_many_hashes).

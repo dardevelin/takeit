@@ -4,32 +4,39 @@ takeit file-transfer protocol — pure logic, no I/O.
 Wire format (control over the wormhole's app-message channel; bulk over a
 dilation subchannel):
 
-Control messages (JSON, one per app-message):
+Rendezvous-visible control messages (JSON, one per app-message):
 - Sender → Receiver: ``{"offer": {...}}`` then ``{"complete": true}``
-- Receiver → Sender: ``{"answer": {"accept": true, "chunks_have": [...]}}``
-  or ``{"answer": {"reject": "reason"}}``, then ``{"done": true}``
+- Receiver → Sender: ``{"answer": {"accept": true}}`` or
+  ``{"answer": {"reject": "reason"}}``, then ``{"done": true}``
 
-Every offer carries a `kind` discriminator: "file", "directory", or "text".
+The offer carries a `kind` discriminator: "file", "directory", or "text".
 Per-kind offer shapes:
 
 - kind="file": transfer_id, filename, size, content_hash, chunk_size,
-  chunk_hashes, app_version. Chunks stream over the dilation subchannel.
+  app_version. Chunks stream over the dilation subchannel.
 - kind="directory": transfer_id, dir_name, size (of the deterministic-zip
-  byte stream), content_hash, chunk_size, chunk_hashes, num_files, num_bytes
-  (uncompressed totals — advisory, for receiver UX), app_version. Same bulk
-  channel; receiver expands the stream after verification.
+  byte stream), content_hash, chunk_size, num_files, num_bytes
+  (uncompressed totals — advisory, for receiver UX), app_version.
+  Same subchannel; receiver expands the stream after verification.
 - kind="text": transfer_id, text (≤ MAX_TEXT_BYTES UTF-8 bytes), app_version.
-  No bulk channel — the offer IS the payload. The receiver prints it.
+  No subchannel — the offer IS the payload. The receiver prints it.
 
-Bulk format on the dilation subchannel (file/directory only):
-    repeated frames of:
-        chunk_index  (4 bytes BE)
-        chunk_length (4 bytes BE)
-        chunk_bytes  (chunk_length bytes)
-    The sender writes only the chunks the receiver doesn't already have
-    (per `chunks_have` in the answer), in any order, and then closes the
-    channel. The receiver tracks which indices arrived and refuses to
-    finalize unless ``chunks_have ∪ received == {0..N-1}``.
+The offer DOES NOT carry chunk_hashes. Including them would leak the file
+size to a Nostr-relay observer through ciphertext-length analysis. Instead,
+chunk_hashes ride the dilation subchannel — peer-to-peer, never seen by a
+relay. Likewise, `chunks_have` (resume) moves out of the answer onto the
+subchannel reply.
+
+Subchannel framing (file/directory; bulk):
+    1. Sender → Receiver: length-prefixed JSON ``{"chunk_hashes": [...]}``.
+       (4-byte big-endian length, then UTF-8 JSON bytes.)
+    2. Receiver → Sender: length-prefixed JSON ``{"chunks_have": [...]}``.
+       Empty list for fresh transfers; non-empty if resuming.
+    3. Sender → Receiver: chunk frames for indices NOT in chunks_have.
+       Frame: 4-byte BE chunk_index, 4-byte BE chunk_length, chunk_bytes.
+       Frames may arrive in any order. The subchannel close signals
+       "all frames sent."
+    4. Receiver finalizes when ``chunks_have ∪ received == {0..N-1}``.
 """
 import base64
 import hashlib
@@ -69,6 +76,12 @@ MAX_FILENAME_BYTES = 255
 # every reasonable framing limit and keeps memory bounded against a peer
 # that crafts a hostile offer.
 MAX_TEXT_BYTES = 1 << 16  # 64 KiB
+
+# Cap on subchannel-header body length (length-prefixed JSON between
+# sender and receiver before chunk frames). MAX_CHUNK_COUNT × 32-byte
+# hashes × 4/3 base64 expansion + JSON overhead ≈ 32 MiB. A peer claiming
+# a 4 GiB header is malicious — we refuse before allocating.
+MAX_HEADER_BYTES = 64 * (1 << 20)  # 64 MiB ceiling, generous
 
 # Offer kinds. New kinds get added here; parse_offer rejects anything else.
 KIND_FILE = "file"
@@ -193,9 +206,10 @@ def compute_text_transfer_id(text):
     return h.digest()
 
 
-def _validate_chunked_offer(size, chunk_size, chunk_hashes):
+def _validate_chunked_offer(size, chunk_size):
     """Shared validation for file/directory offers (both stream chunked
-    payloads). Mutates nothing; raises ValueError on any issue."""
+    payloads). Post-HYP-392 chunk_hashes no longer ride the offer — only
+    size/chunk_size are validated here."""
     if size < 0:
         raise ValueError(f"negative size: {size}")
     if size > MAX_OFFER_SIZE:
@@ -203,30 +217,19 @@ def _validate_chunked_offer(size, chunk_size, chunk_hashes):
             f"offer size {size} exceeds max {MAX_OFFER_SIZE}")
     if chunk_size <= 0:
         raise ValueError(f"non-positive chunk_size: {chunk_size}")
-    expected_count = expected_chunk_count(size, chunk_size)
-    if expected_count > MAX_CHUNK_COUNT:
-        raise ValueError(
-            f"chunk count {expected_count} exceeds max {MAX_CHUNK_COUNT}")
-    if len(chunk_hashes) != expected_count:
-        raise ValueError(
-            f"chunk_hashes count {len(chunk_hashes)} != expected "
-            f"{expected_count}")
-    for ch in chunk_hashes:
-        if not isinstance(ch, (bytes, bytearray)) or len(ch) != 32:
-            raise ValueError("each chunk hash must be 32 bytes")
 
 
-def build_offer_file(filename, size, content_hash, chunk_hashes,
+def build_offer_file(filename, size, content_hash,
                      chunk_size=DEFAULT_CHUNK_SIZE,
                      app_version="takeit/0.0.1"):
     """Build a `kind="file"` offer.
 
-    `chunk_hashes` is a list of 32-byte BLAKE2b-256 digests, one per chunk
-    in order. The receiver uses these to verify each chunk on arrival and
-    to identify reusable chunks across resumed transfers.
+    chunk_hashes are NOT part of the offer (HYP-392); they ride the
+    dilation subchannel via build_subchannel_header so the relay can't
+    infer file size from the offer's encrypted length.
     """
     _validate_filename(filename)
-    _validate_chunked_offer(size, chunk_size, chunk_hashes)
+    _validate_chunked_offer(size, chunk_size)
     transfer_id = compute_transfer_id(KIND_FILE, size, filename, content_hash)
     return {
         "offer": {
@@ -236,26 +239,24 @@ def build_offer_file(filename, size, content_hash, chunk_hashes,
             "size": size,
             "content_hash": base64.b64encode(content_hash).decode("ascii"),
             "chunk_size": chunk_size,
-            "chunk_hashes": [
-                base64.b64encode(h).decode("ascii") for h in chunk_hashes],
             "app_version": app_version,
         }
     }
 
 
-def build_offer_directory(dir_name, size, content_hash, chunk_hashes,
+def build_offer_directory(dir_name, size, content_hash,
                           num_files, num_bytes,
                           chunk_size=DEFAULT_CHUNK_SIZE,
                           app_version="takeit/0.0.1"):
     """Build a `kind="directory"` offer.
 
-    The chunk fields describe the deterministic-zip byte stream. `num_files`
-    and `num_bytes` are advisory totals over the uncompressed source tree —
-    the receiver shows them in the accept prompt so the user knows what they
-    are agreeing to before any bytes move.
+    `num_files` and `num_bytes` are advisory totals over the uncompressed
+    source tree — the receiver shows them in the accept prompt. The
+    deterministic-zip byte stream itself is described by `size` and
+    `content_hash`; chunk_hashes ride the subchannel header (HYP-392).
     """
     _validate_filename(dir_name)  # same rules apply: NUL, traversal, length
-    _validate_chunked_offer(size, chunk_size, chunk_hashes)
+    _validate_chunked_offer(size, chunk_size)
     if not isinstance(num_files, int) or num_files < 0:
         raise ValueError(f"num_files must be a non-negative int: {num_files!r}")
     if not isinstance(num_bytes, int) or num_bytes < 0:
@@ -270,8 +271,6 @@ def build_offer_directory(dir_name, size, content_hash, chunk_hashes,
             "size": size,
             "content_hash": base64.b64encode(content_hash).decode("ascii"),
             "chunk_size": chunk_size,
-            "chunk_hashes": [
-                base64.b64encode(h).decode("ascii") for h in chunk_hashes],
             "num_files": num_files,
             "num_bytes": num_bytes,
             "app_version": app_version,
@@ -354,11 +353,19 @@ def parse_offer(payload):
 
 
 def _parse_chunked_offer(o, name_field):
-    """Validate the shared chunked-stream fields shared by file and directory
+    """Validate the shared chunked-stream fields for file and directory
     offers. `name_field` is "filename" for file offers and "dir_name" for
-    directory offers; both have identical hardening."""
-    for field in (name_field, "size", "content_hash", "chunk_size",
-                  "chunk_hashes"):
+    directory offers; both have identical hardening.
+
+    Post-HYP-392 the offer no longer carries chunk_hashes — those ride
+    the dilation subchannel. A peer including chunk_hashes here is on a
+    stale protocol; refuse rather than silently misinterpret.
+    """
+    if "chunk_hashes" in o:
+        raise ProtocolError(
+            "offer must not carry 'chunk_hashes' "
+            "(moved to dilation subchannel)")
+    for field in (name_field, "size", "content_hash", "chunk_size"):
         if field not in o:
             raise ProtocolError(f"offer missing {field!r}")
     if not isinstance(o[name_field], str):
@@ -374,68 +381,33 @@ def _parse_chunked_offer(o, name_field):
             f"offer size {o['size']} exceeds max {MAX_OFFER_SIZE}")
     if not isinstance(o["chunk_size"], int) or o["chunk_size"] <= 0:
         raise ProtocolError("chunk_size must be a positive int")
-    if not isinstance(o["chunk_hashes"], list):
-        raise ProtocolError("chunk_hashes must be a list")
-    # Cap chunk count BEFORE base64-decoding the chunk_hashes list. A
-    # malicious offer with size=2**40, chunk_size=1 would otherwise allocate
-    # ~1e12 entries during decode and OOM the receiver.
-    if len(o["chunk_hashes"]) > MAX_CHUNK_COUNT:
-        raise ProtocolError(
-            f"chunk_hashes count {len(o['chunk_hashes'])} exceeds max "
-            f"{MAX_CHUNK_COUNT}")
-    expected_count = expected_chunk_count(o["size"], o["chunk_size"])
-    if expected_count > MAX_CHUNK_COUNT:
-        raise ProtocolError(
-            f"expected chunk count {expected_count} exceeds max "
-            f"{MAX_CHUNK_COUNT}")
     try:
         o["_content_hash_bytes"] = base64.b64decode(o["content_hash"])
-        o["_chunk_hashes_bytes"] = [
-            base64.b64decode(h) for h in o["chunk_hashes"]]
     except Exception as e:
-        raise ProtocolError(f"bad base64 in offer: {e}")
+        raise ProtocolError(f"bad base64 in content_hash: {e}")
     if len(o["_content_hash_bytes"]) != 32:
         raise ProtocolError("content_hash must be 32 bytes (BLAKE2b-256)")
-    if len(o["_chunk_hashes_bytes"]) != expected_count:
-        raise ProtocolError(
-            f"chunk_hashes count {len(o['_chunk_hashes_bytes'])} != expected "
-            f"{expected_count}")
-    for h in o["_chunk_hashes_bytes"]:
-        if len(h) != 32:
-            raise ProtocolError("each chunk hash must be 32 bytes")
 
 
-def build_answer(accept, reject_reason=None, chunks_have=None):
-    """Receiver's response to the offer.
-
-    `chunks_have` is a list of chunk indices the receiver already has from a
-    prior partial transfer. Empty (or omitted) for fresh transfers.
-    """
+def build_answer(accept, reject_reason=None):
+    """Receiver's response to the offer. Post-HYP-392 the answer is just
+    accept/reject — chunks_have moved to the dilation-subchannel reply
+    so the receiver has the chunk_hashes it needs to compute it."""
     if accept:
-        return {"answer": {
-            "accept": True,
-            "chunks_have": sorted(chunks_have) if chunks_have else [],
-        }}
+        return {"answer": {"accept": True}}
     return {"answer": {"reject": reject_reason or "rejected"}}
 
 
 def parse_answer(payload):
-    """Returns (accepted: bool, reason: str or None, chunks_have: list[int]).
-
-    For rejected answers, chunks_have is an empty list.
-    """
+    """Returns (accepted: bool, reason: str or None)."""
     msg = _decode(payload)
     if not isinstance(msg, dict) or "answer" not in msg:
         raise ProtocolError("expected an 'answer' message")
     a = msg["answer"]
     if a.get("accept") is True:
-        chunks_have = a.get("chunks_have", [])
-        if not isinstance(chunks_have, list) or \
-                not all(isinstance(i, int) and i >= 0 for i in chunks_have):
-            raise ProtocolError("chunks_have must be a list of non-negative ints")
-        return True, None, chunks_have
+        return True, None
     if "reject" in a:
-        return False, str(a["reject"]), []
+        return False, str(a["reject"])
     raise ProtocolError("answer missing 'accept' or 'reject'")
 
 
@@ -545,3 +517,107 @@ def verify_chunk(chunk_bytes, expected_hash):
     """True if BLAKE2b-256(chunk_bytes) matches expected_hash exactly."""
     return hashlib.blake2b(
         chunk_bytes, digest_size=32).digest() == expected_hash
+
+
+# --- subchannel framing (HYP-392) ---
+
+
+# 4-byte big-endian length prefix for subchannel control messages.
+_LEN_HDR = struct.Struct(">I")
+
+
+def encode_length_prefixed(body):
+    """Frame a body as `[4-byte BE length][body bytes]` for the
+    dilation subchannel. Used for chunk_hashes header (sender→receiver)
+    and chunks_have reply (receiver→sender) before chunk frames."""
+    if len(body) > MAX_HEADER_BYTES:
+        raise ValueError(
+            f"body length {len(body)} exceeds max {MAX_HEADER_BYTES}")
+    return _LEN_HDR.pack(len(body)) + body
+
+
+class LengthPrefixedDecoder:
+    """Buffer incremental subchannel bytes and yield complete bodies.
+
+    Caps body length at MAX_HEADER_BYTES so a hostile peer claiming a
+    4 GiB body can't make us preallocate. Empty (zero-length) bodies
+    are rejected — every protocol message has content."""
+
+    def __init__(self):
+        self._buf = bytearray()
+
+    def feed(self, data):
+        self._buf.extend(data)
+        while True:
+            if len(self._buf) < _LEN_HDR.size:
+                return
+            (length,) = _LEN_HDR.unpack(
+                bytes(self._buf[:_LEN_HDR.size]))
+            if length == 0:
+                raise ProtocolError("zero-length subchannel message")
+            if length > MAX_HEADER_BYTES:
+                raise ProtocolError(
+                    f"subchannel message length {length} exceeds max "
+                    f"{MAX_HEADER_BYTES}")
+            total = _LEN_HDR.size + length
+            if len(self._buf) < total:
+                return
+            body = bytes(self._buf[_LEN_HDR.size:total])
+            del self._buf[:total]
+            yield body
+
+
+def build_subchannel_header(chunk_hashes):
+    """Build the sender's subchannel header carrying chunk_hashes.
+    Returns the length-prefixed bytes ready to write to the subchannel."""
+    body = json.dumps({
+        "chunk_hashes": [
+            base64.b64encode(h).decode("ascii") for h in chunk_hashes],
+    }, separators=(",", ":")).encode("utf-8")
+    return encode_length_prefixed(body)
+
+
+def parse_subchannel_header(payload):
+    """Parse the receiver's view of the sender's subchannel header.
+    Returns the list of 32-byte chunk-hash bytes."""
+    msg = _decode(payload)
+    if not isinstance(msg, dict) or "chunk_hashes" not in msg:
+        raise ProtocolError("subchannel header missing 'chunk_hashes'")
+    chunk_hashes_b64 = msg["chunk_hashes"]
+    if not isinstance(chunk_hashes_b64, list):
+        raise ProtocolError("chunk_hashes must be a list")
+    if len(chunk_hashes_b64) > MAX_CHUNK_COUNT:
+        raise ProtocolError(
+            f"chunk_hashes count {len(chunk_hashes_b64)} exceeds max "
+            f"{MAX_CHUNK_COUNT}")
+    try:
+        chunk_hashes = [base64.b64decode(h) for h in chunk_hashes_b64]
+    except Exception as e:
+        raise ProtocolError(f"bad base64 in chunk_hashes: {e}")
+    for h in chunk_hashes:
+        if len(h) != 32:
+            raise ProtocolError("each chunk hash must be 32 bytes")
+    return chunk_hashes
+
+
+def build_chunks_have(chunks_have):
+    """Build the receiver's subchannel reply listing already-have indices.
+    Empty list for fresh transfers; the sender skips those indices."""
+    body = json.dumps({
+        "chunks_have": sorted(chunks_have) if chunks_have else [],
+    }, separators=(",", ":")).encode("utf-8")
+    return encode_length_prefixed(body)
+
+
+def parse_chunks_have(payload):
+    """Parse the sender's view of the receiver's chunks_have reply."""
+    msg = _decode(payload)
+    if not isinstance(msg, dict) or "chunks_have" not in msg:
+        raise ProtocolError("subchannel reply missing 'chunks_have'")
+    chunks_have = msg["chunks_have"]
+    if not isinstance(chunks_have, list):
+        raise ProtocolError("chunks_have must be a list")
+    if not all(isinstance(i, int) and i >= 0 for i in chunks_have):
+        raise ProtocolError(
+            "chunks_have must be a list of non-negative ints")
+    return chunks_have

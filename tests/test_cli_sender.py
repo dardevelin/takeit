@@ -1,22 +1,23 @@
 """
-Tests for the takeit sender's pull-producer flow control.
+Tests for the takeit sender's two-phase subchannel flow (HYP-392).
 
-Verifies:
-- The protocol registers itself as a (non-streaming) producer on the transport.
-- Each `resumeProducing` call advances by one chunk.
-- Disk reads happen off the reactor thread (mocked deferToThread proves this).
+Phase 1 (header): connectionMade writes the chunk_hashes header; protocol
+buffers inbound bytes until the receiver's chunks_have reply arrives.
+Phase 2 (stream): pull-producer streams chunk frames.
+
+Verified:
+- The sender writes the subchannel header on connection.
+- After the chunks_have reply, registers as a non-streaming producer.
+- Each `resumeProducing` advances by exactly one chunk.
+- Disk reads happen off the reactor thread (mocked deferToThread).
 - `stopProducing` halts further work.
-- An out-of-range chunk index errbacks the factory's `done` Deferred.
-- After all chunks are sent, the producer is unregistered and the
-  connection is closed.
+- An out-of-range chunk index errbacks the factory's `done`.
+- After all chunks are sent, the producer is unregistered and closed.
 """
-import os
-from io import BytesIO
+import hashlib
 
-import pytest
 from twisted.internet.defer import Deferred
 from zope.interface import implementer
-from zope.interface.verify import verifyObject
 from twisted.internet.interfaces import IPullProducer
 
 from takeit.cli import cli as cli_mod
@@ -25,12 +26,7 @@ from takeit.cli import _protocol as P
 
 @implementer(IPullProducer)  # we'll verify this via the protocol's behavior
 class _FakeTransport:
-    """A pull-producer-aware transport stand-in.
-
-    Records writes; lets the test drive resumeProducing manually rather
-    than the reactor doing it. The producer registers itself here; we
-    record that and then crank resumeProducing as many times as we need.
-    """
+    """A pull-producer-aware transport stand-in."""
 
     def __init__(self):
         self.writes = []
@@ -54,25 +50,12 @@ class _FakeTransport:
         self.connection_lost = True
 
 
-def _make_factory(path, chunk_size, chunks_to_send):
-    return cli_mod._SenderFactory(path, chunk_size, chunks_to_send)
+class _FakeReason:
+    def __init__(self, msg):
+        self._msg = msg
 
-
-def test_registers_as_pull_producer(tmp_path, monkeypatch):
-    src = tmp_path / "f.bin"
-    src.write_bytes(b"x" * 100)
-    f = _make_factory(str(src), 50, [0, 1])
-    proto = cli_mod._SenderProtocol(f)
-    transport = _FakeTransport()
-    proto.transport = transport
-    # Patch deferToThread to run synchronously, returning a fired Deferred,
-    # so we don't need a real reactor.
-    monkeypatch.setattr(cli_mod, "deferToThread",
-                        lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
-    proto.connectionMade()
-    assert transport.producer is proto
-    # Pull-producer registration: streaming=False
-    assert transport.streaming is False
+    def getErrorMessage(self):
+        return self._msg
 
 
 def _sync_defer(fn, *args, **kwargs):
@@ -87,40 +70,104 @@ def _sync_defer(fn, *args, **kwargs):
     return d
 
 
-def test_resume_producing_advances_one_chunk_at_a_time(tmp_path, monkeypatch):
+def _hashes_for(payload, chunk_size):
+    """Compute per-chunk BLAKE2b-256 hashes for a byte string."""
+    hashes = []
+    for i in range(0, len(payload), chunk_size):
+        hashes.append(
+            hashlib.blake2b(
+                payload[i:i + chunk_size], digest_size=32).digest())
+    return hashes
+
+
+def _make_factory(path, chunk_size, chunk_hashes):
+    return cli_mod._SenderFactory(path, chunk_size, chunk_hashes)
+
+
+def _setup_proto(tmp_path, payload, chunk_size, chunk_hashes, monkeypatch):
+    """Build a wired-up sender protocol on a fake transport, with
+    deferToThread monkeypatched to run synchronously."""
     src = tmp_path / "f.bin"
-    payload = b"".join(bytes([i % 256]) * 50 for i in range(4))
     src.write_bytes(payload)
-    f = _make_factory(str(src), 50, [0, 1, 2, 3])
+    f = _make_factory(str(src), chunk_size, chunk_hashes)
     proto = cli_mod._SenderProtocol(f)
     transport = _FakeTransport()
     proto.transport = transport
     monkeypatch.setattr(cli_mod, "deferToThread",
                         lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
     proto.connectionMade()
+    return proto, transport, f
 
-    # Each resumeProducing should produce exactly one frame.
-    proto.resumeProducing()
+
+def _enter_stream_phase(proto, chunks_have):
+    """Feed a chunks_have reply into the protocol, transitioning it from
+    header phase to stream phase."""
+    framed = P.build_chunks_have(chunks_have)
+    proto.dataReceived(framed)
+
+
+def test_connection_made_writes_subchannel_header(tmp_path, monkeypatch):
+    """Phase 1: connectionMade writes the length-prefixed chunk_hashes
+    header. No producer is registered yet — that happens after the
+    receiver's chunks_have reply arrives."""
+    payload = b"x" * 100
+    chunk_hashes = _hashes_for(payload, 50)
+    proto, transport, _f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    # Exactly one write so far: the subchannel header.
     assert len(transport.writes) == 1
+    assert transport.producer is None
+    # Header round-trips through the LengthPrefixedDecoder + parser.
+    decoder = P.LengthPrefixedDecoder()
+    bodies = list(decoder.feed(transport.writes[0]))
+    assert len(bodies) == 1
+    parsed = P.parse_subchannel_header(bodies[0])
+    assert parsed == chunk_hashes
+
+
+def test_registers_as_pull_producer_after_reply(tmp_path, monkeypatch):
+    payload = b"x" * 100
+    chunk_hashes = _hashes_for(payload, 50)
+    proto, transport, _f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[])
+    assert transport.producer is proto
+    assert transport.streaming is False  # pull producer
+
+
+def test_resume_producing_advances_one_chunk_at_a_time(
+        tmp_path, monkeypatch):
+    payload = b"".join(bytes([i % 256]) * 50 for i in range(4))
+    chunk_hashes = _hashes_for(payload, 50)
+    proto, transport, f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[])
+    # Header write counts as one. Drop it from "frame count" math by
+    # tracking the writes after entering stream phase.
+    pre_stream_writes = len(transport.writes)
+
     proto.resumeProducing()
-    assert len(transport.writes) == 2
+    assert len(transport.writes) - pre_stream_writes == 1
+    proto.resumeProducing()
+    assert len(transport.writes) - pre_stream_writes == 2
     proto.resumeProducing()
     proto.resumeProducing()
-    assert len(transport.writes) == 4
+    assert len(transport.writes) - pre_stream_writes == 4
 
     # One more call: no more chunks, producer should unregister + close.
     proto.resumeProducing()
     assert transport.unregistered
     assert transport.connection_lost
-    # done Deferred won't fire until connectionLost is called by transport
     proto.connectionLost(_FakeReason("Connection closed"))
     assert f.done.called
 
 
 def test_disk_reads_go_through_deferToThread(tmp_path, monkeypatch):
+    payload = b"x" * 100
+    chunk_hashes = _hashes_for(payload, 50)
     src = tmp_path / "f.bin"
-    src.write_bytes(b"x" * 100)
-    f = _make_factory(str(src), 50, [0, 1])
+    src.write_bytes(payload)
+    f = _make_factory(str(src), 50, chunk_hashes)
     proto = cli_mod._SenderProtocol(f)
     transport = _FakeTransport()
     proto.transport = transport
@@ -133,30 +180,29 @@ def test_disk_reads_go_through_deferToThread(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_mod, "deferToThread", fake_deferToThread)
     proto.connectionMade()
+    _enter_stream_phase(proto, chunks_have=[])
     proto.resumeProducing()
 
+    # First call should be _read_chunk for chunk index 0.
     assert len(deferToThread_calls) == 1
     fn, args, _ = deferToThread_calls[0]
-    # The thread-target is _read_chunk(fh, idx, chunk_size)
     assert fn is cli_mod._read_chunk
-    assert args[1] == 0  # first chunk index
-    assert args[2] == 50  # chunk_size
+    assert args[1] == 0
+    assert args[2] == 50
 
 
 def test_out_of_range_chunk_errbacks(tmp_path, monkeypatch):
-    src = tmp_path / "f.bin"
-    src.write_bytes(b"x" * 50)  # only one chunk's worth of data
-    f = _make_factory(str(src), 50, [5])  # but we ask for chunk index 5
-    proto = cli_mod._SenderProtocol(f)
-    transport = _FakeTransport()
-    proto.transport = transport
-    monkeypatch.setattr(cli_mod, "deferToThread",
-                        lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
-
-    proto.connectionMade()
+    """If the protocol is asked to send a chunk beyond the file's end
+    (file shorter than chunk_hashes implies), the factory's done
+    Deferred errbacks."""
+    payload = b"x" * 50  # only 1 chunk's worth on disk
+    # But we hand 6 chunk_hashes — pretend the file should be 6 chunks.
+    chunk_hashes = [b"\x00" * 32] * 6
+    proto, transport, f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[0, 1, 2, 3, 4])  # only idx 5 left
     proto.resumeProducing()
 
-    # done should have errbacked. We need to add an errback to inspect.
     failures = []
     f.done.addErrback(lambda f_: failures.append(f_))
     assert len(failures) == 1
@@ -165,53 +211,54 @@ def test_out_of_range_chunk_errbacks(tmp_path, monkeypatch):
 
 
 def test_stop_producing_halts_writes(tmp_path, monkeypatch):
-    src = tmp_path / "f.bin"
-    src.write_bytes(b"x" * 200)
-    f = _make_factory(str(src), 50, [0, 1, 2, 3])
-    proto = cli_mod._SenderProtocol(f)
-    transport = _FakeTransport()
-    proto.transport = transport
-    monkeypatch.setattr(cli_mod, "deferToThread",
-                        lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
-    proto.connectionMade()
+    payload = b"x" * 200
+    chunk_hashes = _hashes_for(payload, 50)
+    proto, transport, _f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[])
+    pre_stream_writes = len(transport.writes)
 
     proto.resumeProducing()
     proto.resumeProducing()
     proto.stopProducing()
-    # Subsequent resumeProducing should be a no-op
-    proto.resumeProducing()
-    assert len(transport.writes) == 2  # only the two before stopProducing
+    proto.resumeProducing()  # no-op after stop
+    assert len(transport.writes) - pre_stream_writes == 2
 
 
-def test_only_chunks_to_send_are_sent_in_order(tmp_path, monkeypatch):
-    """Resume scenario: we send a non-contiguous, possibly-reordered set."""
-    src = tmp_path / "f.bin"
-    payload = b"".join(bytes([i]) * 4 for i in range(10))  # 10 chunks of 4 bytes each
-    src.write_bytes(payload)
-    f = _make_factory(str(src), 4, [3, 7, 1])  # only these three, in this order
-    proto = cli_mod._SenderProtocol(f)
-    transport = _FakeTransport()
-    proto.transport = transport
-    monkeypatch.setattr(cli_mod, "deferToThread",
-                        lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
+def test_resume_skips_chunks_have(tmp_path, monkeypatch):
+    """Receiver tells us 'I already have chunks 0 and 2'; we should send
+    only chunks 1 and 3."""
+    payload = b"".join(bytes([i]) * 4 for i in range(4))
+    chunk_hashes = _hashes_for(payload, 4)
+    proto, transport, _f = _setup_proto(
+        tmp_path, payload, 4, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[0, 2])
+    pre_stream_writes = len(transport.writes)
 
-    proto.connectionMade()
-    for _ in range(4):  # one extra to trigger the close
+    for _ in range(3):  # 2 chunks + final call to trigger close
         proto.resumeProducing()
 
-    assert len(transport.writes) == 3
-    # Decode the frames and check indices are 3, 7, 1 in order
+    frames = transport.writes[pre_stream_writes:]
+    assert len(frames) == 2
     decoder = P.FrameDecoder()
     indices = []
-    for frame in transport.writes:
+    for frame in frames:
         for idx, _data in decoder.feed(frame):
             indices.append(idx)
-    assert indices == [3, 7, 1]
+    assert indices == [1, 3]
 
 
-class _FakeReason:
-    def __init__(self, msg):
-        self._msg = msg
-
-    def getErrorMessage(self):
-        return self._msg
+def test_unexpected_data_after_reply_errbacks(tmp_path, monkeypatch):
+    """The receiver sends one reply during the header phase; any
+    further bytes from them are a protocol error."""
+    payload = b"x" * 100
+    chunk_hashes = _hashes_for(payload, 50)
+    proto, transport, f = _setup_proto(
+        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    _enter_stream_phase(proto, chunks_have=[])
+    # Now feed extra bytes — sender should treat this as misbehavior.
+    proto.dataReceived(b"unexpected")
+    failures = []
+    f.done.addErrback(lambda f_: failures.append(f_))
+    assert len(failures) == 1
+    assert "unexpected bytes" in str(failures[0].value)

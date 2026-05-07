@@ -2,11 +2,13 @@
 takeit command-line interface.
 
 Two subcommands: ``send`` and ``receive``. Aliases ``tx`` / ``rx``. The
-protocol shape (offer with chunk hashes → answer with chunks_have → bulk
-chunked stream → complete → done) is defined in `takeit.cli._protocol`,
-and resume sidecar files in `takeit.cli._resume`. This module is the
-Twisted + Click glue that wires it to a real wormhole + dilation transport.
+protocol shape (offer → answer → subchannel header carrying chunk_hashes
+→ chunks_have reply → chunk frames → complete → done) is defined in
+`takeit.cli._protocol`, and resume sidecar files in `takeit.cli._resume`.
+This module is the Twisted + Click glue that wires it to a real wormhole
++ dilation transport.
 """
+import base64
 import os
 import shutil
 import sys
@@ -350,7 +352,7 @@ def _run_send_text(reactor, text, code_length, relays, explicit_code,
             answer_payload = yield w.get_message()
         finally:
             spinner.stop()
-        accepted, reason, _chunks_have = P.parse_answer(answer_payload)
+        accepted, reason = P.parse_answer(answer_payload)
         if not accepted:
             click.echo(f"Receiver declined: {reason}", err=True)
             yield w.close()
@@ -388,46 +390,36 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
         if qr:
             _print_qr(code)
 
-        # Send the offer (per-kind shape).
+        # Send the offer (per-kind shape). Post-HYP-392, chunk_hashes
+        # do NOT ride the offer — they go on the dilation subchannel
+        # so the relay can't infer file size from offer ciphertext length.
         if kind == P.KIND_FILE:
             offer_msg = P.build_offer_file(
-                name, size, content_hash, chunk_hashes,
-                chunk_size=chunk_size)
+                name, size, content_hash, chunk_size=chunk_size)
         elif kind == P.KIND_DIRECTORY:
             offer_msg = P.build_offer_directory(
-                name, size, content_hash, chunk_hashes,
+                name, size, content_hash,
                 num_files=num_files, num_bytes=num_bytes,
                 chunk_size=chunk_size)
         else:
             raise AssertionError(f"unsupported send kind: {kind!r}")
         w.send_message(P.encode_message(offer_msg))
 
-        # Wait for the answer (which may include resumed chunk indices).
-        # Run the toss-and-spin spinner during this wait — receiver may be
-        # typing the code, deciding whether to accept, etc. Stop and clear
-        # the spinner before any further output.
+        # Wait for the receiver's accept/decline.
         spinner = Sp.TossSpinner(reactor)
         spinner.start()
         try:
             answer_payload = yield w.get_message()
         finally:
             spinner.stop()
-        accepted, reason, chunks_have = P.parse_answer(answer_payload)
+        accepted, reason = P.parse_answer(answer_payload)
         if not accepted:
             click.echo(f"Receiver declined: {reason}", err=True)
             yield w.close()
             sys.exit(1)
 
-        chunks_to_send = sorted(
-            set(range(len(chunk_hashes))) - set(chunks_have))
-        skipped = len(chunks_have)
-        if skipped:
-            click.echo(f"Resuming: receiver already has {skipped} chunk(s); "
-                       f"sending {len(chunks_to_send)}")
-
-        # Dilate and stream the file body over a subchannel. Spin during
-        # the handshake — STUN candidates racing, Noise prologue, KCM
-        # selection — brief on LAN, longer on slow links.
+        # Dilate and open the bulk subchannel. Spin during the handshake —
+        # STUN candidates racing, Noise prologue, KCM selection.
         spinner = Sp.TossSpinner(reactor)
         spinner.start()
         try:
@@ -442,14 +434,13 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
                 f"{_pretty_size(num_bytes)} → {_pretty_size(size)} zipped)...")
         else:
             click.echo(f"Sending {name} ({_pretty_size(size)})...")
-        # Bytes to send = sum of remaining chunk sizes. The last chunk may
-        # be short — compute against actual sizes, not chunk_size * count.
-        bytes_to_send = sum(
-            min(chunk_size, size - i * chunk_size) for i in chunks_to_send)
-        progress = _make_progress_bar(bytes_to_send, desc="sending")
+        # Maximum bytes that could be sent (full transfer). The actual
+        # number is reduced by chunks_have which we don't know yet — the
+        # progress bar's total updates after the receiver replies.
+        progress = _make_progress_bar(size, desc="sending")
         try:
             yield _send_chunks_over_subchannel(
-                reactor, ep, payload_path, chunk_size, chunks_to_send,
+                reactor, ep, payload_path, chunk_size, chunk_hashes,
                 progress=progress)
         finally:
             progress.close()
@@ -465,17 +456,17 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
 
 @inlineCallbacks
 def _send_chunks_over_subchannel(reactor, endpoint, path, chunk_size,
-                                 chunks_to_send, progress=None):
-    factory = _SenderFactory(path, chunk_size, chunks_to_send, progress)
+                                 chunk_hashes, progress=None):
+    factory = _SenderFactory(path, chunk_size, chunk_hashes, progress)
     yield endpoint.connect(factory)
     yield factory.done
 
 
 class _SenderFactory(ClientFactory):
-    def __init__(self, path, chunk_size, chunks_to_send, progress=None):
+    def __init__(self, path, chunk_size, chunk_hashes, progress=None):
         self._path = path
         self._chunk_size = chunk_size
-        self._chunks_to_send = chunks_to_send
+        self._chunk_hashes = chunk_hashes
         self._progress = progress  # tqdm-like, or None
         self.done = Deferred()
 
@@ -486,11 +477,16 @@ class _SenderFactory(ClientFactory):
 class _SenderProtocol(Protocol):
     """Streams chunks to the dilation subchannel using a pull producer.
 
-    Registers as a non-streaming (pull) producer on the transport so that
-    `resumeProducing` is called only when the transport has buffer room —
-    this gives proper backpressure and bounds memory to roughly the size
-    of one chunk in flight, regardless of how big the file is. Disk reads
-    happen on a worker thread so the reactor isn't blocked on slow disks.
+    Two phases (HYP-392):
+    1. Header phase: write build_subchannel_header(chunk_hashes), then
+       buffer incoming bytes through a LengthPrefixedDecoder until the
+       receiver's chunks_have reply arrives.
+    2. Stream phase: register as a pull producer; `resumeProducing` is
+       called when the transport has buffer room. Disk reads happen on
+       a worker thread so the reactor isn't blocked on slow disks.
+
+    Memory is bounded to roughly one chunk in flight regardless of file
+    size — pull producer + chunked reads keep us flat under any pressure.
     """
 
     def __init__(self, factory):
@@ -501,6 +497,9 @@ class _SenderProtocol(Protocol):
         self._stopped = False
         self._finished = False
         self._progress = factory._progress
+        # Header-phase state
+        self._reply_decoder = P.LengthPrefixedDecoder()
+        self._header_phase = True
 
     def connectionMade(self):
         try:
@@ -509,7 +508,56 @@ class _SenderProtocol(Protocol):
             self._factory.done.errback(e)
             self.transport.loseConnection()
             return
-        self._chunks_iter = iter(self._factory._chunks_to_send)
+        # Send the chunk_hashes header (HYP-392) — receiver needs it
+        # before it can compute chunks_have.
+        self.transport.write(
+            P.build_subchannel_header(self._factory._chunk_hashes))
+        # Wait for chunks_have reply on dataReceived; the pull producer
+        # is registered only after we know which chunks to send.
+
+    def dataReceived(self, data):
+        if not self._header_phase:
+            # No further inbound bytes are expected on the sender side
+            # post-header; if any arrive, the peer is misbehaving.
+            self._fail(P.ProtocolError(
+                "unexpected bytes from receiver after chunks_have reply"))
+            return
+        try:
+            for body in self._reply_decoder.feed(data):
+                chunks_have = P.parse_chunks_have(body)
+                self._enter_stream_phase(chunks_have)
+                return
+        except P.ProtocolError as e:
+            self._fail(e)
+
+    def _enter_stream_phase(self, chunks_have):
+        self._header_phase = False
+        total = len(self._factory._chunk_hashes)
+        chunks_to_send = sorted(set(range(total)) - set(chunks_have))
+        if chunks_have:
+            click.echo(
+                f"Resuming: receiver already has {len(chunks_have)} "
+                f"chunk(s); sending {len(chunks_to_send)}")
+        # Update the progress bar's total to reflect skipped chunks.
+        if self._progress is not None:
+            chunk_size = self._factory._chunk_size
+            # Each chunk is chunk_size except possibly the last.
+            # We don't know `size` here; leave the bar's total as-is
+            # (it was set by _do_send to size, which is the upper bound).
+            # Mark the skipped bytes as already-progressed.
+            skipped_bytes = 0
+            # Reuse the offer's per-chunk size estimation: full chunks
+            # except the last. We don't have `size`, so estimate as
+            # chunk_size for each — slightly off for the last chunk if
+            # it's in chunks_have, but the overall bar is accurate
+            # within one chunk_size which is already the case.
+            for idx in chunks_have:
+                skipped_bytes += chunk_size
+            try:
+                self._progress.update(skipped_bytes)
+            except Exception:
+                pass
+        self._chunks_iter = iter(chunks_to_send)
         # streaming=False -> resumeProducing called repeatedly until we
         # unregister; pauseProducing is a no-op for pull producers.
         self.transport.registerProducer(self, False)
@@ -660,15 +708,10 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             sys.exit(1)
 
         if offer["kind"] == P.KIND_TEXT:
+            # Typing the code IS the consent for text — wormhole's
+            # behavior. No filesystem side effect, nothing to "accept";
+            # just print the message and close.
             text = offer["text"]
-            click.echo(
-                f"Offered: text message ({len(text)} character(s))")
-            if not auto_accept:
-                if not click.confirm("Show?", default=True):
-                    w.send_message(P.encode_message(
-                        P.build_answer(False, "user declined")))
-                    yield w.close()
-                    return
             w.send_message(P.encode_message(P.build_answer(True)))
             # Print the text exactly as sent — no quoting, no extra
             # newline beyond what the sender included.
@@ -731,62 +774,40 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             yield w.close()
             sys.exit(1)
 
-        # Check for resumable state. Compute chunks_have silently here;
-        # surface it to the user as part of the "Receiving into …"
-        # message AFTER they accept, so a "Resuming: N chunks" line
-        # before the prompt doesn't imply the transfer has started.
-        offer_chunk_hashes_b64 = offer["chunk_hashes"]
+        # Resume-state probe: knowing whether a prior sidecar exists for
+        # this transfer_id lets us hint the user before the prompt. The
+        # actual chunks_have computation now happens AFTER the dilation
+        # subchannel delivers chunk_hashes (HYP-392) — we don't have
+        # them at offer-parse time.
         prior = R.load_receiver_state(meta_path)
-        chunks_have = []
-        dropped_chunks = 0
-        stale_partial = False
-        if prior is not None and R.can_resume_with(
-                prior, offer["transfer_id"], offer["size"],
-                offer["chunk_size"], offer_chunk_hashes_b64):
-            # A5: do NOT trust the sidecar's chunks_have. A same-user
-            # attacker could pre-stage a malicious sidecar that matches
-            # the offer's deterministic transfer_id but claims indices
-            # the receiver doesn't actually have. Re-hash each claimed
-            # index from disk before agreeing to skip it.
-            claimed = list(prior["chunks_have"])
-            verified = yield deferToThread(
-                R.verify_chunks_have,
-                partial_path,
-                offer["size"],
-                offer["chunk_size"],
-                offer["_chunk_hashes_bytes"],
-                claimed)
-            chunks_have = sorted(verified)
-            dropped_chunks = len(claimed) - len(chunks_have)
-        elif prior is not None:
-            stale_partial = True
+        prior_matches_offer = (
+            prior is not None
+            and prior.get("transfer_id") == offer["transfer_id"]
+            and prior.get("size") == offer["size"]
+            and prior.get("chunk_size") == offer["chunk_size"]
+        )
+        stale_partial = prior is not None and not prior_matches_offer
 
         if not auto_accept:
+            if prior_matches_offer:
+                click.echo(
+                    "(Partial transfer found on disk — resuming if accepted.)")
             if not click.confirm("Accept?", default=False):
                 w.send_message(P.encode_message(
                     P.build_answer(False, "user declined")))
                 yield w.close()
                 return
 
-        # Now that the user has consented, surface the resume state and
-        # clean up any stale partial.
         if stale_partial:
             click.echo("Discarding stale partial (offer doesn't match)")
             R.cleanup_receiver(partial_path, meta_path)
-        if dropped_chunks:
-            click.echo(
-                f"Resume: dropped {dropped_chunks} chunk(s) that failed "
-                "verification")
-        if chunks_have:
-            click.echo(
-                f"Resuming: {len(chunks_have)} chunk(s) already on disk")
 
-        w.send_message(P.encode_message(
-            P.build_answer(True, chunks_have=chunks_have)))
+        # Post-HYP-392 the answer is just accept/reject — chunks_have
+        # moves onto the dilation subchannel reply.
+        w.send_message(P.encode_message(P.build_answer(True)))
 
         # Spinner during the dilation handshake — the peer is finishing
         # the SPAKE2 confirmation and we're racing connection candidates.
-        # Brief on a fast LAN, longer on slow links.
         spinner = Sp.TossSpinner(reactor)
         spinner.start()
         try:
@@ -796,17 +817,11 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         finally:
             spinner.stop()
         click.echo(f"Receiving into {dest_path}...")
-        # Initial bytes already on disk (resumed) shown as "starting at"
-        # so the bar reaches 100% at the offer's full size.
-        bytes_already = sum(
-            min(offer["chunk_size"], offer["size"] - i * offer["chunk_size"])
-            for i in chunks_have)
-        progress = _make_progress_bar(
-            offer["size"], initial_bytes=bytes_already, desc="receiving")
+        progress = _make_progress_bar(offer["size"], desc="receiving")
         try:
             yield _receive_chunks_over_subchannel(
                 reactor, listener_ep, partial_path, meta_path, offer,
-                chunks_have, progress=progress)
+                prior_matches=prior_matches_offer, progress=progress)
         finally:
             progress.close()
 
@@ -880,21 +895,21 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
 
 @inlineCallbacks
 def _receive_chunks_over_subchannel(reactor, listener_ep, partial_path,
-                                    meta_path, offer, chunks_have,
+                                    meta_path, offer, prior_matches,
                                     progress=None):
-    factory = _ReceiverFactory(partial_path, meta_path, offer, chunks_have,
-                               progress)
+    factory = _ReceiverFactory(
+        partial_path, meta_path, offer, prior_matches, progress)
     yield listener_ep.listen(factory)
     yield factory.done
 
 
 class _ReceiverFactory(Factory):
-    def __init__(self, partial_path, meta_path, offer, chunks_have,
+    def __init__(self, partial_path, meta_path, offer, prior_matches,
                  progress=None):
         self._partial_path = partial_path
         self._meta_path = meta_path
         self._offer = offer
-        self._chunks_have = set(chunks_have)
+        self._prior_matches = prior_matches
         self._progress = progress  # tqdm-like, or None
         self.done = Deferred()
 
@@ -903,29 +918,38 @@ class _ReceiverFactory(Factory):
 
 
 class _ReceiverProtocol(Protocol):
-    """Receives chunks at arbitrary indices, verifies each, sparse-writes
-    them to the partial file, and persists progress through a throttle
-    so a 10K-chunk transfer doesn't fsync 10K times."""
+    """Receives the subchannel header (chunk_hashes), then chunks (HYP-392).
+
+    Two phases:
+    1. Header phase: feed bytes to a LengthPrefixedDecoder; on parse,
+       compute chunks_have by re-hashing the partial file off-thread,
+       send the chunks_have reply, switch to chunk phase.
+    2. Chunk phase: feed bytes to FrameDecoder; for each frame, verify
+       hash, sparse-write to partial, throttle-persist sidecar.
+
+    Memory bounded — chunks_have computation reads the partial chunk-
+    by-chunk on a worker thread; the protocol itself only holds one
+    chunk in flight.
+    """
 
     def __init__(self, factory):
         self._factory = factory
-        self._decoder = P.FrameDecoder()
-        self._fh = None
-        # Factory already stored chunks_have as a set; share it directly
-        # so writes here mutate one canonical set rather than diverging.
-        self._chunks_have = factory._chunks_have
         self._offer = factory._offer
         self._chunk_size = self._offer["chunk_size"]
-        self._chunk_hashes = self._offer["_chunk_hashes_bytes"]
-        self._total_chunks = len(self._chunk_hashes)
+        self._size = self._offer["size"]
+        self._content_hash = self._offer["_content_hash_bytes"]
         self._progress = factory._progress
-        self._throttle = R.ReceiverStateThrottle(
-            factory._meta_path,
-            transfer_id_b64=self._offer["transfer_id"],
-            size=self._offer["size"],
-            chunk_size=self._chunk_size,
-            chunk_hashes_b64=self._offer["chunk_hashes"],
-        )
+        # Header-phase state
+        self._header_decoder = P.LengthPrefixedDecoder()
+        self._header_phase = True
+        # Chunk-phase state, populated when header arrives
+        self._frame_decoder = P.FrameDecoder()
+        self._fh = None
+        self._chunks_have = set()
+        self._chunk_hashes = None  # list[bytes], from header
+        self._total_chunks = None
+        self._throttle = None
+        self._stopped = False
 
     def connectionMade(self):
         # Open the partial file in r+b. If it doesn't exist (fresh
@@ -939,13 +963,106 @@ class _ReceiverProtocol(Protocol):
                          0o600)
             os.close(fd)
         self._fh = open(partial, "r+b")
-        # Persist initial state so a kill before any chunks arrive still
-        # writes a usable sidecar matching the offer.
-        self._throttle.initialize(self._chunks_have)
 
     def dataReceived(self, data):
+        if self._stopped:
+            return
+        if self._header_phase:
+            try:
+                for body in self._header_decoder.feed(data):
+                    # Got the full header. Any bytes remaining in the
+                    # current `data` after the header are chunk-phase
+                    # frames — but the decoder consumes them one body
+                    # at a time, so subsequent dataReceived calls will
+                    # carry the chunk frames cleanly.
+                    self._on_header_received(body)
+                    return
+            except P.ProtocolError as e:
+                self._fail(e)
+            return
+        # Chunk phase
+        self._consume_frames(data)
+
+    def _on_header_received(self, body):
         try:
-            for idx, chunk in self._decoder.feed(data):
+            chunk_hashes = P.parse_subchannel_header(body)
+        except P.ProtocolError as e:
+            self._fail(e)
+            return
+        # Sanity-check: the header's chunk count must match what the
+        # offer's size + chunk_size implies.
+        expected_count = P.expected_chunk_count(self._size, self._chunk_size)
+        if len(chunk_hashes) != expected_count:
+            self._fail(P.ProtocolError(
+                f"subchannel header has {len(chunk_hashes)} chunk_hashes "
+                f"but offer implies {expected_count}"))
+            return
+        self._chunk_hashes = chunk_hashes
+        self._total_chunks = len(chunk_hashes)
+        # Reconstruct the b64 list for the throttle/sidecar (sidecar
+        # format hasn't changed — it stores chunk_hashes_b64 to match
+        # against on resume).
+        chunk_hashes_b64 = [
+            base64.b64encode(h).decode("ascii") for h in chunk_hashes]
+        self._throttle = R.ReceiverStateThrottle(
+            self._factory._meta_path,
+            transfer_id_b64=self._offer["transfer_id"],
+            size=self._size,
+            chunk_size=self._chunk_size,
+            chunk_hashes_b64=chunk_hashes_b64,
+        )
+        # Compute chunks_have by re-hashing the partial off-thread.
+        # Skip if no prior sidecar matched (fresh transfer).
+        if self._factory._prior_matches:
+            prior = R.load_receiver_state(self._factory._meta_path)
+            claimed = list(prior.get("chunks_have", []))
+            d = deferToThread(
+                R.verify_chunks_have,
+                self._factory._partial_path,
+                self._size, self._chunk_size,
+                chunk_hashes, claimed)
+            d.addCallback(self._on_chunks_have_verified, claimed)
+            d.addErrback(self._on_verify_failed)
+        else:
+            self._on_chunks_have_verified(set(), [])
+
+    def _on_chunks_have_verified(self, verified, claimed):
+        if self._stopped:
+            return
+        chunks_have = sorted(verified)
+        dropped = len(claimed) - len(chunks_have)
+        if dropped:
+            click.echo(
+                f"Resume: dropped {dropped} chunk(s) that failed "
+                "verification")
+        if chunks_have:
+            click.echo(
+                f"Resuming: {len(chunks_have)} chunk(s) already on disk")
+            # Mark resumed bytes as already-progressed.
+            if self._progress is not None:
+                bytes_already = sum(
+                    min(self._chunk_size,
+                        self._size - i * self._chunk_size)
+                    for i in chunks_have)
+                try:
+                    self._progress.update(bytes_already)
+                except Exception:
+                    pass
+        self._chunks_have = set(chunks_have)
+        self._throttle.initialize(self._chunks_have)
+        # Send the chunks_have reply to the sender.
+        self.transport.write(P.build_chunks_have(chunks_have))
+        self._header_phase = False
+        # Any chunk-phase bytes that arrived while we were verifying are
+        # in the dilation transport's input buffer; Twisted will deliver
+        # them via subsequent dataReceived calls.
+
+    def _on_verify_failed(self, failure):
+        self._fail(failure.value)
+
+    def _consume_frames(self, data):
+        try:
+            for idx, chunk in self._frame_decoder.feed(data):
                 if idx >= self._total_chunks:
                     raise P.ProtocolError(
                         f"chunk index {idx} >= total {self._total_chunks}")
@@ -961,21 +1078,30 @@ class _ReceiverProtocol(Protocol):
                 if self._progress is not None:
                     self._progress.update(len(chunk))
         except P.ProtocolError as e:
-            if not self._factory.done.called:
-                self._factory.done.errback(e)
+            self._fail(e)
+
+    def _fail(self, exc):
+        self._stopped = True
+        if not self._factory.done.called:
+            self._factory.done.errback(exc)
 
     def connectionLost(self, reason):
-        # Flush whatever progress we have before closing — don't lose the
-        # last `interval` seconds of chunks_have just because the peer
-        # dropped the connection.
-        try:
-            self._throttle.flush()
-        except Exception as e:  # pragma: no cover
-            log.err(e)
+        # Flush whatever progress we have before closing.
+        if self._throttle is not None:
+            try:
+                self._throttle.flush()
+            except Exception as e:  # pragma: no cover
+                log.err(e)
         if self._fh is not None:
             self._fh.close()
             self._fh = None
         if self._factory.done.called:
+            return
+        if self._stopped:
+            return  # _fail already errbacked
+        if self._total_chunks is None:
+            self._factory.done.errback(P.ProtocolError(
+                "subchannel closed before header arrived"))
             return
         if self._chunks_have == set(range(self._total_chunks)):
             self._factory.done.callback(None)
