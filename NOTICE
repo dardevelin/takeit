@@ -1,0 +1,37 @@
+takeit
+======
+
+Copyright (c) 2026 Darcy Brás da Silva
+
+This product includes software derived from magic-wormhole
+(https://github.com/magic-wormhole/magic-wormhole),
+copyright (c) 2015 Brian Warner, also under the MIT License.
+
+The following source files are lifted verbatim from magic-wormhole and
+remain primarily Brian Warner's work. The copyright on those files is
+shared between the original author and takeit's contributors:
+
+    src/takeit/eventual.py
+    src/takeit/ipaddrs.py
+    src/takeit/observer.py
+    src/takeit/timing.py
+    src/takeit/util.py
+    src/takeit/_wordlist.py
+    src/takeit/_order.py
+    src/takeit/_send.py
+    src/takeit/_receive.py
+    src/takeit/_status.py
+    src/takeit/_hints.py
+    src/takeit/_dilation/__init__.py
+    src/takeit/_dilation/_noise.py
+    src/takeit/_dilation/encode.py
+    src/takeit/_dilation/inbound.py
+    src/takeit/_dilation/manager.py
+    src/takeit/_dilation/outbound.py
+    src/takeit/_dilation/roles.py
+    src/takeit/_dilation/subchannel.py
+
+Other files in src/takeit/ have been substantially modified or are new
+to takeit; see git history for per-file authorship.
+
+The MIT License text is in the LICENSE file.
