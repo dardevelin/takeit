@@ -663,7 +663,7 @@ def _run_send_text(
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
-        _warn_if_words_only(code)
+        _validate_words_only_handoff(code, verify)
         if qr:
             _print_qr(code)
         if verify:
@@ -731,7 +731,7 @@ def _do_send(
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
-        _warn_if_words_only(code)
+        _validate_words_only_handoff(code, verify)
         if qr:
             _print_qr(code)
         if verify:
@@ -1075,7 +1075,7 @@ def _run_receive(
         else:
             w.set_code(code)
 
-        _warn_if_words_only(code)
+        _validate_words_only_handoff(code, verify)
 
         if verify:
             yield _confirm_verifier(w)
@@ -1627,23 +1627,46 @@ def _pretty_size(n):
         f /= 1024
 
 
-def _warn_if_words_only(code):
-    """Print a stderr warning if `code` is words-only (no locator).
+def _validate_words_only_handoff(code, verify):
+    """Refuse a words-only `code` unless `--verify` was passed (HYP-416).
 
-    Words-only handoff is vulnerable to relay-mediated MITM (HYP-406):
-    a hostile relay can precompute every 3-word → tag mapping and
-    actively interpose. Mandatory verifier comparison via --verify is
-    the only mitigation. We print the warning at every site that
-    resolves a code so the user gets exactly one notice per session.
+    Background: HYP-406 closed the canonical-code oracle by adding a
+    128-bit locator to the on-the-wire code shape (``<base32>:<words>``).
+    With a locator present, a hostile Nostr relay can no longer
+    precompute every 3-word → tag mapping. Words-only handoff is
+    preserved as a legacy ergonomic, but in that mode the relay CAN
+    still mount an active MITM — the audit's wording is that words-only
+    "cannot honestly claim relay-level anonymity or active-relay MITM
+    resistance." Out-of-band SAS comparison via ``--verify`` is the
+    only mitigation, so we REFUSE to proceed without it.
+
+    Three branches, all four (shape, verify) combinations covered:
+
+    * canonical full-shape code (contains ``:``) → silent return; the
+      locator already authenticates the channel.
+    * words-only + ``verify=False`` → ``click.UsageError`` with a
+      message that names BOTH escapes (rerun with --verify, or paste
+      the full ``<locator>:<words>`` form). The user must NOT see a
+      vague "warning" they can shrug off.
+    * words-only + ``verify=True`` → soft stderr note. The user has
+      already opted into the SAS prompt; we just remind them that
+      THIS comparison is the load-bearing security check.
     """
-    if ":" not in code:
-        click.echo(
-            "Warning: words-only code handoff. A hostile Nostr relay "
-            "could intercept this transfer. Use --verify on BOTH sides "
-            "and compare the authentication string out-of-band before "
-            "accepting the file.",
-            err=True,
+    if ":" in code:
+        return
+    if not verify:
+        raise click.UsageError(
+            "Words-only code handoff requires --verify on both sides "
+            "(a hostile Nostr relay could otherwise intercept this "
+            "transfer). Either:\n"
+            "  - rerun with --verify and compare the SAS out-of-band, OR\n"
+            "  - paste the full <locator>:<words> code (e.g. via QR)."
         )
+    click.echo(
+        "Note: words-only code handoff. The verifier comparison you're "
+        "about to do is what makes this transfer MITM-resistant.",
+        err=True,
+    )
 
 
 def format_verifier(verifier):
