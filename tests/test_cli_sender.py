@@ -241,7 +241,9 @@ def test_resume_skips_chunks_have(tmp_path, monkeypatch):
 
     frames = transport.writes[pre_stream_writes:]
     assert len(frames) == 2
-    decoder = P.FrameDecoder()
+    # Decoder in test/legacy mode (no total_size) — we just want to
+    # crack the indices out of the wire frames.
+    decoder = P.FrameDecoder(chunk_size=4, total_chunks=4)
     indices = []
     for frame in frames:
         for idx, _data in decoder.feed(frame):

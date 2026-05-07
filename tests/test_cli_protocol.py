@@ -329,14 +329,16 @@ def test_parse_simple_flag_rejects_other_keys():
 def test_frame_round_trip_via_decoder():
     chunks = [(0, b"hello"), (2, b"world!"), (1, b"\x00\x01\x02")]
     stream = b"".join(frame(i, c) for i, c in chunks)
-    dec = FrameDecoder()
+    # All these chunks are sub-chunk-size; only the last one (idx 2) gets
+    # to be short. Use chunk_size large enough to fit all 3 as full chunks.
+    dec = FrameDecoder(chunk_size=6, total_chunks=3)
     out = list(dec.feed(stream))
     assert out == chunks
 
 
 def test_frame_decoder_reassembles_split_buffers():
     payload = frame(0, b"abcdef") + frame(1, b"xyz")
-    dec = FrameDecoder()
+    dec = FrameDecoder(chunk_size=6, total_chunks=2)
     out = []
     for byte in payload:
         out.extend(dec.feed(bytes([byte])))
@@ -347,9 +349,80 @@ def test_frame_decoder_rejects_zero_length_frame():
     """The new frame format reserves zero-length as malformed (a non-empty
     chunk is the only valid payload)."""
     bad = struct.pack(">II", 0, 0)
-    dec = FrameDecoder()
+    dec = FrameDecoder(chunk_size=10, total_chunks=1)
     with pytest.raises(ProtocolError, match="zero-length"):
         list(dec.feed(bad))
+
+
+# --- HYP-409: length-cap and bounds checks ---
+
+
+def test_frame_decoder_rejects_oversized_chunk_length():
+    """A peer that's accepted (post-handshake) shouldn't be able to
+    declare a 4 GiB frame and OOM us. Cap declared length at chunk_size."""
+    # Hand-craft a frame header claiming length=1024 with chunk_size=512.
+    bogus = struct.pack(">II", 0, 1024)
+    dec = FrameDecoder(chunk_size=512, total_chunks=1)
+    with pytest.raises(ProtocolError, match="exceeds chunk_size|length"):
+        list(dec.feed(bogus))
+
+
+def test_frame_decoder_rejects_chunk_index_out_of_range():
+    """Chunk index >= total_chunks is malformed (no such chunk exists
+    in the offer's expected set)."""
+    bogus = frame(5, b"hello")
+    dec = FrameDecoder(chunk_size=10, total_chunks=3)
+    with pytest.raises(ProtocolError, match="index|range"):
+        list(dec.feed(bogus))
+
+
+def test_frame_decoder_accepts_correct_last_chunk_short_length():
+    """The last chunk of a transfer can be shorter than chunk_size.
+    e.g. size=25, chunk_size=10 → last chunk index 2 has length 5."""
+    last = frame(2, b"01234")  # 5 bytes, expected last-chunk length
+    dec = FrameDecoder(chunk_size=10, total_chunks=3, total_size=25)
+    out = list(dec.feed(last))
+    assert out == [(2, b"01234")]
+
+
+def test_frame_decoder_rejects_wrong_last_chunk_length():
+    """Last chunk must be EXACTLY (size - 1) % chunk_size + 1 bytes
+    (or chunk_size if size is a multiple). A peer sending a different
+    length on the last chunk is misbehaving — refuse before write."""
+    # size=25, chunk_size=10, last chunk should be exactly 5 bytes.
+    # We declare 6 bytes which is wrong.
+    wrong = frame(2, b"012345")  # 6 bytes
+    dec = FrameDecoder(chunk_size=10, total_chunks=3, total_size=25)
+    with pytest.raises(ProtocolError, match="last chunk|length"):
+        list(dec.feed(wrong))
+
+
+def test_frame_decoder_rejects_short_non_last_chunk():
+    """Non-last chunks must be EXACTLY chunk_size bytes. A peer
+    sending a partial frame for a non-last index is misbehaving."""
+    # size=25, chunk_size=10. Non-last chunks (0, 1) must be 10 bytes.
+    short = frame(0, b"01234")  # 5 bytes on a non-last chunk
+    dec = FrameDecoder(chunk_size=10, total_chunks=3, total_size=25)
+    with pytest.raises(ProtocolError, match="length|chunk_size"):
+        list(dec.feed(short))
+
+
+def test_frame_decoder_size_multiple_of_chunk_size_last_is_full():
+    """When total_size is an exact multiple of chunk_size, the last
+    chunk is also full chunk_size — not zero, not short."""
+    # size=20, chunk_size=10, total_chunks=2. Last chunk is 10 bytes.
+    last_full = frame(1, b"0123456789")
+    dec = FrameDecoder(chunk_size=10, total_chunks=2, total_size=20)
+    out = list(dec.feed(last_full))
+    assert out == [(1, b"0123456789")]
+
+
+def test_frame_decoder_size_zero_total_chunks_zero():
+    """An empty transfer has zero chunks. Any frame received is
+    malformed — there's nothing to receive."""
+    dec = FrameDecoder(chunk_size=10, total_chunks=0, total_size=0)
+    with pytest.raises(ProtocolError, match="index|range"):
+        list(dec.feed(frame(0, b"x")))
 
 
 def test_frame_rejects_zero_length_chunk():

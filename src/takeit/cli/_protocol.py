@@ -487,10 +487,35 @@ class FrameDecoder:
     the receiver knows the expected set of indices from the offer + answer
     handshake; it considers the transfer complete when ``connectionLost``
     arrives AND every expected chunk has been delivered.
+
+    Bounds (HYP-409, audit #5): a peer that's already been accepted
+    (post-SPAKE2) shouldn't be able to declare a 4 GiB frame and OOM us.
+    The decoder caps each frame's declared length at `chunk_size`,
+    refuses chunk indices `>= total_chunks`, and validates the last
+    chunk's exact short length against `total_size` if given.
     """
 
-    def __init__(self):
+    def __init__(self, chunk_size, total_chunks, total_size=None):
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive: {chunk_size}")
+        if total_chunks < 0:
+            raise ValueError(f"total_chunks must be >= 0: {total_chunks}")
         self._buf = bytearray()
+        self._chunk_size = chunk_size
+        self._total_chunks = total_chunks
+        # Last-chunk exact length, derived from total_size if available.
+        # When None, the last-chunk-length check degrades to "<= chunk_size"
+        # rather than "exactly N", which is still a real cap (just
+        # slightly looser).
+        if total_size is None:
+            self._last_chunk_length = None
+        elif total_size == 0:
+            self._last_chunk_length = 0  # zero-byte transfer; no chunks
+        else:
+            # last chunk's length = ((total_size - 1) % chunk_size) + 1.
+            # This works even when total_size is a multiple of chunk_size
+            # (gives chunk_size, the full-chunk case).
+            self._last_chunk_length = ((total_size - 1) % chunk_size) + 1
 
     def feed(self, data: bytes):
         self._buf.extend(data)
@@ -500,6 +525,33 @@ class FrameDecoder:
             chunk_index, length = _FRAME_HDR.unpack(bytes(self._buf[: _FRAME_HDR.size]))
             if length == 0:
                 raise ProtocolError("zero-length chunk frame is invalid")
+            if chunk_index >= self._total_chunks:
+                raise ProtocolError(
+                    f"chunk index {chunk_index} out of range "
+                    f"(total_chunks={self._total_chunks})"
+                )
+            if length > self._chunk_size:
+                raise ProtocolError(
+                    f"declared chunk length {length} exceeds chunk_size "
+                    f"{self._chunk_size}"
+                )
+            # Length-vs-position validation requires total_size. When
+            # total_size is None (test/legacy mode) we only enforce the
+            # `length <= chunk_size` cap above, which is still a real
+            # OOM defense, just not a strict-equals check.
+            if self._last_chunk_length is not None:
+                is_last = chunk_index == self._total_chunks - 1
+                if is_last:
+                    if length != self._last_chunk_length:
+                        raise ProtocolError(
+                            f"last chunk length {length} != expected "
+                            f"{self._last_chunk_length}"
+                        )
+                elif length != self._chunk_size:
+                    raise ProtocolError(
+                        f"non-last chunk length {length} != chunk_size "
+                        f"{self._chunk_size}"
+                    )
             total = _FRAME_HDR.size + length
             if len(self._buf) < total:
                 return

@@ -1380,8 +1380,12 @@ class _ReceiverProtocol(Protocol):
         # Header-phase state
         self._header_decoder = P.LengthPrefixedDecoder()
         self._header_phase = True
-        # Chunk-phase state, populated when header arrives
-        self._frame_decoder = P.FrameDecoder()
+        # Chunk-phase state, populated when header arrives. FrameDecoder
+        # construction is deferred to _on_header_received so it can be
+        # given chunk_size / total_chunks / total_size for length caps
+        # (HYP-409); constructing it here pre-header would force a
+        # bypass of those caps until total_chunks lands.
+        self._frame_decoder = None
         self._fh = None
         self._chunks_have = set()
         self._chunk_hashes = None  # list[bytes], from header
@@ -1464,6 +1468,16 @@ class _ReceiverProtocol(Protocol):
             return
         self._chunk_hashes = chunk_hashes
         self._total_chunks = len(chunk_hashes)
+        # Now that we know chunk_size + total_chunks + total_size, we
+        # can construct the FrameDecoder with proper length caps.
+        # Pre-header bytes can't reach _consume_frames because
+        # _header_phase guards dataReceived; the deferred construction
+        # is therefore safe.
+        self._frame_decoder = P.FrameDecoder(
+            chunk_size=self._chunk_size,
+            total_chunks=self._total_chunks,
+            total_size=self._size,
+        )
         # Reconstruct the b64 list for the throttle/sidecar (sidecar
         # format hasn't changed — it stores chunk_hashes_b64 to match
         # against on resume).
