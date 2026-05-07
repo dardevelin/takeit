@@ -679,14 +679,35 @@ def build_chunks_have(chunks_have):
     return encode_length_prefixed(body)
 
 
-def parse_chunks_have(payload):
-    """Parse the sender's view of the receiver's chunks_have reply."""
+def parse_chunks_have(payload, *, total_chunks):
+    """Parse the sender's view of the receiver's chunks_have reply.
+
+    `total_chunks` is the chunk count the sender computed when building
+    the offer (`len(chunk_hashes)`). The sender always knows it; passing
+    it in lets us reject lists that a malicious receiver packed inside
+    the 64 MiB header cap to burn sender memory/CPU (HYP-410). We:
+
+      - reject `len(chunks_have) > total_chunks` (no peer can legitimately
+        already-have more chunks than exist),
+      - reject any index `< 0` or `>= total_chunks`,
+      - dedupe and sort, so the sender's downstream `set(chunks_have)`
+        is built from a bounded, normalized list.
+    """
     msg = _decode(payload)
     if not isinstance(msg, dict) or "chunks_have" not in msg:
         raise ProtocolError("subchannel reply missing 'chunks_have'")
     chunks_have = msg["chunks_have"]
     if not isinstance(chunks_have, list):
         raise ProtocolError("chunks_have must be a list")
-    if not all(isinstance(i, int) and i >= 0 for i in chunks_have):
-        raise ProtocolError("chunks_have must be a list of non-negative ints")
-    return chunks_have
+    if not all(isinstance(i, int) for i in chunks_have):
+        raise ProtocolError("chunks_have must be a list of ints")
+    if len(chunks_have) > total_chunks:
+        raise ProtocolError(
+            f"chunks_have length {len(chunks_have)} exceeds total_chunks {total_chunks}"
+        )
+    for i in chunks_have:
+        if i < 0 or i >= total_chunks:
+            raise ProtocolError(
+                f"chunks_have index {i} out of range [0, {total_chunks})"
+            )
+    return sorted(set(chunks_have))

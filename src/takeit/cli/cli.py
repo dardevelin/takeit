@@ -880,7 +880,14 @@ class _SenderProtocol(Protocol):
             return
         try:
             for body in self._reply_decoder.feed(data):
-                chunks_have = P.parse_chunks_have(body)
+                # HYP-410: bound the receiver's reply against the
+                # sender-known chunk count so a malicious peer can't
+                # pack the 64 MiB header cap with millions of indices
+                # to burn our memory/CPU on `set(chunks_have)`.
+                chunks_have = P.parse_chunks_have(
+                    body,
+                    total_chunks=len(self._factory._chunk_hashes),
+                )
                 self._enter_stream_phase(chunks_have)
                 return
         except P.ProtocolError as e:

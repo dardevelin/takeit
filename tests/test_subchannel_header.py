@@ -156,7 +156,7 @@ def test_parse_subchannel_header_rejects_too_many_hashes():
 def test_build_and_parse_chunks_have():
     framed = build_chunks_have([5, 0, 2])
     body = _deframe_one(framed)
-    out = parse_chunks_have(body)
+    out = parse_chunks_have(body, total_chunks=10)
     # Sorted on the wire so the sender doesn't have to re-sort.
     assert out == [0, 2, 5]
 
@@ -165,22 +165,86 @@ def test_build_chunks_have_empty():
     """Fresh (non-resumed) transfers send an empty list."""
     framed = build_chunks_have([])
     body = _deframe_one(framed)
-    assert parse_chunks_have(body) == []
+    assert parse_chunks_have(body, total_chunks=10) == []
 
 
 def test_parse_chunks_have_rejects_negative_int():
     payload = json.dumps({"chunks_have": [-1]}).encode()
     with pytest.raises(ProtocolError):
-        parse_chunks_have(payload)
+        parse_chunks_have(payload, total_chunks=10)
 
 
 def test_parse_chunks_have_rejects_non_int():
     payload = json.dumps({"chunks_have": ["zero"]}).encode()
     with pytest.raises(ProtocolError):
-        parse_chunks_have(payload)
+        parse_chunks_have(payload, total_chunks=10)
 
 
 def test_parse_chunks_have_rejects_missing_field():
     payload = json.dumps({"other": []}).encode()
     with pytest.raises(ProtocolError, match="chunks_have|missing"):
-        parse_chunks_have(payload)
+        parse_chunks_have(payload, total_chunks=10)
+
+
+# --- HYP-410: bounds-check chunks_have against total_chunks ---
+
+
+def test_parse_chunks_have_rejects_list_longer_than_total_chunks():
+    """A malicious receiver packing more indices than the sender's offer
+    has chunks would burn sender CPU/memory building a giant set. Reject
+    before allocating."""
+    payload = json.dumps({"chunks_have": list(range(11))}).encode()
+    with pytest.raises(ProtocolError, match="exceeds|too many|length"):
+        parse_chunks_have(payload, total_chunks=10)
+
+
+def test_parse_chunks_have_rejects_index_at_total_chunks():
+    """Indices are 0-based; total_chunks itself is out of range."""
+    payload = json.dumps({"chunks_have": [10]}).encode()
+    with pytest.raises(ProtocolError, match="range|out of|index"):
+        parse_chunks_have(payload, total_chunks=10)
+
+
+def test_parse_chunks_have_rejects_index_above_total_chunks():
+    payload = json.dumps({"chunks_have": [0, 1, 999]}).encode()
+    with pytest.raises(ProtocolError, match="range|out of|index"):
+        parse_chunks_have(payload, total_chunks=10)
+
+
+def test_parse_chunks_have_rejects_negative_with_total_chunks():
+    """Same negative-index check, exercised via the new total_chunks path."""
+    payload = json.dumps({"chunks_have": [-1, 0, 1]}).encode()
+    with pytest.raises(ProtocolError):
+        parse_chunks_have(payload, total_chunks=10)
+
+
+def test_parse_chunks_have_accepts_valid_sorted_list():
+    payload = json.dumps({"chunks_have": [0, 5, 9]}).encode()
+    assert parse_chunks_have(payload, total_chunks=10) == [0, 5, 9]
+
+
+def test_parse_chunks_have_returns_sorted_unique():
+    """Receiver may send unsorted/duplicate indices; the parser dedupes
+    and sorts so the sender's downstream set-build is bounded."""
+    payload = json.dumps({"chunks_have": [5, 0, 2, 5, 0]}).encode()
+    assert parse_chunks_have(payload, total_chunks=10) == [0, 2, 5]
+
+
+def test_parse_chunks_have_zero_total_rejects_any_nonempty_list():
+    """A zero-chunk transfer (empty file) cannot legitimately have any
+    chunks_have entries."""
+    payload = json.dumps({"chunks_have": [0]}).encode()
+    with pytest.raises(ProtocolError, match="range|out of|index|exceeds"):
+        parse_chunks_have(payload, total_chunks=0)
+
+
+def test_parse_chunks_have_zero_total_accepts_empty_list():
+    """Empty chunks_have is always valid, even at total_chunks=0."""
+    payload = json.dumps({"chunks_have": []}).encode()
+    assert parse_chunks_have(payload, total_chunks=0) == []
+
+
+def test_parse_chunks_have_accepts_empty_list_at_total_10():
+    """Fresh transfers send []."""
+    payload = json.dumps({"chunks_have": []}).encode()
+    assert parse_chunks_have(payload, total_chunks=10) == []
