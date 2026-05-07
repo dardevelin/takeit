@@ -122,6 +122,10 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
   closes the connection. Brute-force isn't practical.
 - **Your filename and file size are also encrypted** — the relays we
   use to find each other never see them.
+- **Want to be extra sure?** Pass `--verify` on both sides. takeit
+  shows a short authentication string after the code is exchanged;
+  read it out loud and the receiver checks it matches before any
+  bytes move. Catches even a determined attacker.
 
 A few honest limits:
 
@@ -216,9 +220,6 @@ resume logic, security defenses, and CLI behavior. See
 
 - **Multi-file send is one-shot.** `takeit send a b c` (multiple
   positionals) is not supported — pass a directory instead.
-- **No verifier (SAS) display.** takeit computes a short verification
-  string but the CLI doesn't surface it for paranoid out-of-band
-  comparison.
 - **Privacy: the routing tag is HKDF-deterministic.** A relay operator
   can precompute every possible `(code → tag)` mapping and detect
   specific codes in use. Doesn't enable a man-in-the-middle, but it's

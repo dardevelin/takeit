@@ -183,8 +183,18 @@ def main(ctx, debug):
     default=False,
     help="Also render the code as a terminal QR code (useful for hand-off to a phone).",
 )
+@click.option(
+    "--verify",
+    "verify",
+    is_flag=True,
+    default=False,
+    help="Show the short authentication string (SAS) and pause for "
+    "out-of-band comparison before any payload moves.",
+)
 @click.pass_context
-def cmd_send(ctx, path, text_input, code_length, relays, explicit_code, no_cache, qr):
+def cmd_send(
+    ctx, path, text_input, code_length, relays, explicit_code, no_cache, qr, verify
+):
     """Send a file, directory, or text.
 
     Directories are streamed as a deterministic zip — the receiver
@@ -200,7 +210,10 @@ def cmd_send(ctx, path, text_input, code_length, relays, explicit_code, no_cache
     if text_input is not None:
         # Read from stdin if the value is "-".
         text = sys.stdin.read() if text_input == "-" else text_input
-        react(_run_send_text, (text, code_length, relay_list, explicit_code, qr, debug))
+        react(
+            _run_send_text,
+            (text, code_length, relay_list, explicit_code, qr, verify, debug),
+        )
         return
     # Path validation runs here (not in the Click annotation) so that
     # --text vs path mutual-exclusion can fire first with a clear
@@ -211,7 +224,16 @@ def cmd_send(ctx, path, text_input, code_length, relays, explicit_code, no_cache
         raise click.UsageError(f"Path {path!r} is not readable")
     react(
         _run_send,
-        (path, code_length, relay_list, explicit_code, not no_cache, qr, debug),
+        (
+            path,
+            code_length,
+            relay_list,
+            explicit_code,
+            not no_cache,
+            qr,
+            verify,
+            debug,
+        ),
     )
 
 
@@ -238,8 +260,16 @@ def cmd_send(ctx, path, text_input, code_length, relays, explicit_code, no_cache
     help="Where to save the received file "
     "(default: ~/Downloads if it exists, else current dir).",
 )
+@click.option(
+    "--verify",
+    "verify",
+    is_flag=True,
+    default=False,
+    help="Show the short authentication string (SAS) and pause for "
+    "out-of-band comparison before accepting any payload.",
+)
 @click.pass_context
-def cmd_receive(ctx, code, auto_accept, relays, output_dir):
+def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify):
     """Receive a file using a code.
 
     If no CODE is given, you'll be prompted to type one with tab-completion
@@ -250,7 +280,14 @@ def cmd_receive(ctx, code, auto_accept, relays, output_dir):
         output_dir = _default_output_dir()
     react(
         _run_receive,
-        (code, auto_accept, relay_list, output_dir, ctx.obj.get("debug", False)),
+        (
+            code,
+            auto_accept,
+            relay_list,
+            output_dir,
+            verify,
+            ctx.obj.get("debug", False),
+        ),
     )
 
 
@@ -312,7 +349,17 @@ def _handle_cli_error(exc, debug):
 
 
 @inlineCallbacks
-def _run_send(reactor, path, code_length, relays, explicit_code, use_cache, qr, debug):
+def _run_send(
+    reactor,
+    path,
+    code_length,
+    relays,
+    explicit_code,
+    use_cache,
+    qr,
+    verify,
+    debug,
+):
     chunk_size = P.DEFAULT_CHUNK_SIZE
     is_dir = os.path.isdir(path)
 
@@ -349,6 +396,7 @@ def _run_send(reactor, path, code_length, relays, explicit_code, use_cache, qr, 
                 relays,
                 explicit_code,
                 qr,
+                verify,
                 debug,
                 kind=P.KIND_DIRECTORY,
                 num_files=num_files,
@@ -402,13 +450,23 @@ def _run_send(reactor, path, code_length, relays, explicit_code, use_cache, qr, 
         relays,
         explicit_code,
         qr,
+        verify,
         debug,
         kind=P.KIND_FILE,
     )
 
 
 @inlineCallbacks
-def _run_send_text(reactor, text, code_length, relays, explicit_code, qr, debug):
+def _run_send_text(
+    reactor,
+    text,
+    code_length,
+    relays,
+    explicit_code,
+    qr,
+    verify,
+    debug,
+):
     """Send a text message inline. The offer IS the payload — no
     chunked stream, no dilation. Same accept/decline gate as files
     so the receiver still gets to consent before the text appears."""
@@ -424,6 +482,8 @@ def _run_send_text(reactor, text, code_length, relays, explicit_code, qr, debug)
         click.echo(f"    takeit receive {code}")
         if qr:
             _print_qr(code)
+        if verify:
+            yield _confirm_verifier(w)
 
         offer_msg = P.build_offer_text(text)
         w.send_message(P.encode_message(offer_msg))
@@ -465,6 +525,7 @@ def _do_send(
     relays,
     explicit_code,
     qr,
+    verify,
     debug,
     *,
     kind,
@@ -487,6 +548,8 @@ def _do_send(
         click.echo(f"    takeit receive {code}")
         if qr:
             _print_qr(code)
+        if verify:
+            yield _confirm_verifier(w)
 
         # Send the offer (per-kind shape). Post-HYP-392, chunk_hashes
         # do NOT ride the offer — they go on the dilation subchannel
@@ -762,7 +825,7 @@ def _rmtree_quiet(path):
 
 
 @inlineCallbacks
-def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
+def _run_receive(reactor, code, auto_accept, relays, output_dir, verify, debug):
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         # B2: resolve output_dir via realpath so a symlinked output_dir
@@ -798,6 +861,9 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             code = yield w.get_code()
         else:
             w.set_code(code)
+
+        if verify:
+            yield _confirm_verifier(w)
 
         # Wait for the sender's offer. The sender may be hashing a large
         # file before they can publish — for a 10 GB source this is ~20 s.
@@ -1259,6 +1325,34 @@ def _pretty_size(n):
         if f < 1024 or u == units[-1]:
             return f"{f:.1f} {u}" if u != "B" else f"{int(n)} B"
         f /= 1024
+
+
+def format_verifier(verifier):
+    """Render the protocol's verifier bytes as four 4-char hex groups
+    separated by dashes (wormhole's convention).
+
+    Only the first 8 bytes are displayed — that's 64 bits of SAS, plenty
+    for visual comparison and matching wormhole's UX exactly. Comparing
+    longer strings out-of-band is error-prone, and the underlying SPAKE2
+    transcript already binds the full key.
+    """
+    hex16 = verifier[:8].hex()
+    return "-".join(hex16[i : i + 4] for i in range(0, 16, 4))
+
+
+@inlineCallbacks
+def _confirm_verifier(w):
+    """If --verify was set, surface the SAS and block until the user
+    presses Enter. Ctrl-C aborts: callers should treat the raised
+    KeyboardInterrupt as user-declined and close the wormhole."""
+    verifier = yield w.get_verifier()
+    click.echo(f"Verifier: {format_verifier(verifier)}")
+    click.echo(
+        "Compare with the other side and press Enter to continue, or Ctrl-C to abort.",
+    )
+    # click.prompt with default="" + show_default=False is the cleanest
+    # blocking line read; an empty Enter returns "" and we proceed.
+    click.prompt("", default="", show_default=False, prompt_suffix="")
 
 
 if __name__ == "__main__":
