@@ -77,6 +77,23 @@ takeit receive
 The file lands in `~/Downloads` by default. Use `--output-dir` to save
 it elsewhere.
 
+### Receiver speaks first
+
+Sometimes it's the *receiver* who initiates the transfer ("hey, can
+you send me your config?"). takeit can flip the direction so the
+receiver allocates the code:
+
+```sh
+# you, the receiver
+$ takeit receive --allocate
+takeit code: copper-orbit-staircase
+On the sending machine, run:
+    takeit send --code copper-orbit-staircase <file>
+
+# them, the sender — type the code
+$ takeit send --code copper-orbit-staircase report.pdf
+```
+
 ### Got cut off mid-transfer?
 
 Just rerun both commands. takeit picks up where it stopped. You don't
@@ -93,6 +110,7 @@ where the file is going, and the next attempt resumes from them.
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `--output-dir DIR` (receiver) | Save somewhere other than `~/Downloads`. |
+| `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <words>`. |
 | `--hide-progress` (both) | Suppress the progress bar and spinner. Auto-suppressed when stdout isn't a terminal. |
 | `--debug` | Show full error details if something goes wrong. |
 

@@ -329,13 +329,54 @@ def cmd_send(
     help="Suppress the progress bar and spinner. Auto-suppressed when "
     "stdout is not a terminal.",
 )
+@click.option(
+    "-a",
+    "--allocate",
+    "allocate",
+    is_flag=True,
+    default=False,
+    help="Allocate a fresh code on the receive side and wait for the "
+    "sender to type it (the inverse of the default direction).",
+)
+@click.option(
+    "--code-length",
+    "code_length",
+    type=int,
+    default=None,
+    help="Number of words in the code (only meaningful with --allocate; default 3).",
+)
 @click.pass_context
-def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify, hide_progress):
+def cmd_receive(
+    ctx,
+    code,
+    auto_accept,
+    relays,
+    output_dir,
+    verify,
+    hide_progress,
+    allocate,
+    code_length,
+):
     """Receive a file using a code.
 
     If no CODE is given, you'll be prompted to type one with tab-completion
-    against the wordlist.
+    against the wordlist. Pass ``--allocate`` to invert the direction:
+    takeit will pick a code, you read it to the sender, and the sender
+    types it via ``takeit send --code <words> file.pdf``.
     """
+    if allocate and code is not None:
+        raise click.UsageError(
+            "--allocate and a positional CODE are mutually exclusive: "
+            "either takeit allocates the code (--allocate) or you "
+            "provide one (positional)."
+        )
+    if code_length is not None and not allocate:
+        raise click.UsageError(
+            "--code-length is only meaningful with --allocate (the "
+            "code length is fixed by the sender otherwise)."
+        )
+    if code_length is None:
+        code_length = 3  # match cmd_send's default
     relay_list = list(relays) if relays else None
     if output_dir is None:
         output_dir = _default_output_dir()
@@ -348,6 +389,8 @@ def cmd_receive(ctx, code, auto_accept, relays, output_dir, verify, hide_progres
             output_dir,
             verify,
             hide_progress,
+            allocate,
+            code_length,
             ctx.obj.get("debug", False),
         ),
     )
@@ -900,6 +943,8 @@ def _run_receive(
     output_dir,
     verify,
     hide_progress,
+    allocate,
+    code_length,
     debug,
 ):
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
@@ -922,14 +967,24 @@ def _run_receive(
         # so they don't accumulate over time.
         R.cleanup_orphan_tmp_files(output_dir_real)
 
-        # C2: interactive code entry. If `code` is None (positional
-        # omitted), drop into a readline-driven prompt with tab completion
-        # against the local PGP wordlist. The helper runs in a worker
-        # thread; `input_with_completion` returns whether completion was
-        # used (we discard that — the helper has already submitted the
+        # Three code-resolution paths:
+        # 1. --allocate: takeit picks a code, prints it; sender types it
+        #    in via `takeit send --code ...`. Inverts the direction.
+        # 2. positional code given: caller already has the code; set it.
+        # 3. neither: drop into a readline prompt with tab completion
+        #    against the local PGP wordlist.
+        # The interactive prompt's helper runs in a worker thread;
+        # `input_with_completion` returns whether completion was used
+        # (we discard that — the helper has already submitted the
         # code via choose_words, which fires Code.finished_input which
         # fires Boss.got_code and Key.got_code).
-        if code is None:
+        if allocate:
+            w.allocate_code(code_length=code_length)
+            code = yield w.get_code()
+            click.echo(f"takeit code: {code}")
+            click.echo("On the sending machine, run:")
+            click.echo(f"    takeit send --code {code} <file>")
+        elif code is None:
             from .. import _rlcompleter
 
             helper = w.input_code()
