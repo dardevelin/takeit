@@ -32,6 +32,7 @@ import hashlib
 import io
 import os
 import stat
+import sys
 import zipfile
 
 # Fixed mtime for every entry. (1980, 1, 1, 0, 0, 0) is the zip format's
@@ -51,7 +52,7 @@ _EXTERNAL_ATTR_DIR = (0o755 << 16) | 0x10  # MS-DOS directory bit
 _READ_CHUNK = 1 << 16
 
 
-def walk_directory(root):
+def walk_directory(root, *, ignore_unsendable=False):
     """Walk `root`, returning (sorted_file_paths, num_files, num_bytes).
 
     Sorting is lexicographic on POSIX-style relative paths. Symlinks
@@ -59,7 +60,15 @@ def walk_directory(root):
     - Targets within `root` (after realpath) are followed and included.
     - Targets outside `root` are refused with ValueError. Silently
       following them would exfiltrate files the user didn't intend
-      to include in the transfer.
+      to include in the transfer. This refusal is NOT optional —
+      `ignore_unsendable=True` does NOT relax it (out-of-root symlinks
+      are a privacy concern, not an IO/permission concern).
+
+    `ignore_unsendable=True`: when an entry can't be stat'd
+    (PermissionError, FileNotFoundError on race, etc.), skip it with
+    a stderr warning instead of raising. Use for trees that contain
+    routinely-unreadable noise (e.g. `.git/objects/` owned by another
+    UID, mounted volumes that disappear).
     """
     root_real = os.path.realpath(root)
     if not os.path.isdir(root_real):
@@ -74,6 +83,7 @@ def walk_directory(root):
             # If the entry is a symlink, ensure its target falls inside
             # the source root. Otherwise refuse — rather than silently
             # follow it (privacy risk) or silently drop it (surprising).
+            # The privacy refusal stands regardless of ignore_unsendable.
             if os.path.islink(full):
                 target = os.path.realpath(full)
                 # commonpath raises on different drives (Windows); we
@@ -83,11 +93,20 @@ def walk_directory(root):
                         f"symlink {full!r} points outside the source "
                         f"directory ({target!r}); refusing"
                     )
-            files.append(full)
             try:
-                num_bytes += os.path.getsize(full)
+                size = os.path.getsize(full)
             except OSError as e:
+                if ignore_unsendable:
+                    # Print to stderr; keep this module click-free so
+                    # it stays importable from non-CLI code.
+                    print(
+                        f"Skipping unreadable entry: {full!r} ({e})",
+                        file=sys.stderr,
+                    )
+                    continue
                 raise ValueError(f"cannot stat {full!r}: {e}")
+            files.append(full)
+            num_bytes += size
     return files, len(files), num_bytes
 
 
@@ -130,7 +149,7 @@ class _StreamSink(io.RawIOBase):
             yield self.chunks.pop(0)
 
 
-def deterministic_directory_zip(root):
+def deterministic_directory_zip(root, *, ignore_unsendable=False):
     """Yield a byte-stable zip of `root` chunk-by-chunk.
 
     The total stream is byte-identical for any two runs over the same
@@ -139,9 +158,13 @@ def deterministic_directory_zip(root):
     from BLAKE2b over this stream is therefore stable across runs.
 
     Errors during walking (out-of-root symlinks, unreadable entries) are
-    raised before any bytes are yielded.
+    raised before any bytes are yielded — unless `ignore_unsendable=True`,
+    which skips IO-failing entries with a stderr warning (privacy-failing
+    symlinks still hard-refuse).
     """
-    files, _num_files, _num_bytes = walk_directory(root)
+    files, _num_files, _num_bytes = walk_directory(
+        root, ignore_unsendable=ignore_unsendable
+    )
     root_real = os.path.realpath(root)
     sink = _StreamSink()
     # allowZip64=True: future-proof against >4 GiB directories without
@@ -169,7 +192,7 @@ def deterministic_directory_zip(root):
     yield from sink.drain()
 
 
-def materialize_and_hash(root, out_path, chunk_size):
+def materialize_and_hash(root, out_path, chunk_size, *, ignore_unsendable=False):
     """Stream `root` through deterministic_directory_zip, writing the
     bytes to `out_path` AND computing the per-chunk + whole-stream
     BLAKE2b-256 hashes in a single pass.
@@ -182,13 +205,18 @@ def materialize_and_hash(root, out_path, chunk_size):
     chunked-stream send. The temp-file cost is unavoidable for byte-
     indexed resume — chunk-index → byte-offset only works if the
     sender can seek into the stream.
+
+    `ignore_unsendable=True` is forwarded to the underlying walk; see
+    `walk_directory` for semantics.
     """
     h_all = hashlib.blake2b(digest_size=32)
     chunk_hashes = []
     size = 0
     pending = bytearray()
     with open(out_path, "wb") as out:
-        for piece in deterministic_directory_zip(root):
+        for piece in deterministic_directory_zip(
+            root, ignore_unsendable=ignore_unsendable
+        ):
             out.write(piece)
             h_all.update(piece)
             size += len(piece)

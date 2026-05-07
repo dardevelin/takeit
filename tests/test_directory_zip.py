@@ -349,3 +349,69 @@ def test_zip_stream_hash_stable_across_logically_identical_trees(tmp_path):
     for c in deterministic_directory_zip(str(b)):
         h_b.update(c)
     assert h_a.digest() == h_b.digest()
+
+
+# --- HYP-399: --ignore-unsendable-files ---
+
+
+def test_walk_directory_default_raises_on_unreadable_entry(tmp_path, monkeypatch):
+    """Default behavior: an unreadable entry stops the walk loudly. The
+    user gets the chance to fix the problem rather than silently send
+    a partial tree."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"ok")
+    (src / "broken.txt").write_bytes(b"broken")
+
+    real_getsize = os.path.getsize
+
+    def flaky_getsize(p):
+        if p.endswith("broken.txt"):
+            raise PermissionError("simulated permission denied")
+        return real_getsize(p)
+
+    monkeypatch.setattr(os.path, "getsize", flaky_getsize)
+    with pytest.raises(ValueError, match="cannot stat"):
+        walk_directory(str(src))
+
+
+def test_walk_directory_ignore_unsendable_skips_unreadable(
+    tmp_path, monkeypatch, capsys
+):
+    """With ignore_unsendable=True, an unreadable entry is skipped with
+    a warning; the rest of the tree continues to be walked."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"ok")
+    (src / "broken.txt").write_bytes(b"broken")
+    (src / "b.txt").write_bytes(b"alsook")
+
+    real_getsize = os.path.getsize
+
+    def flaky_getsize(p):
+        if p.endswith("broken.txt"):
+            raise PermissionError("simulated permission denied")
+        return real_getsize(p)
+
+    monkeypatch.setattr(os.path, "getsize", flaky_getsize)
+    paths, num_files, num_bytes = walk_directory(str(src), ignore_unsendable=True)
+    rels = sorted(os.path.relpath(p, str(src)) for p in paths)
+    assert rels == ["a.txt", "b.txt"]
+    assert num_files == 2
+    assert num_bytes == len(b"ok") + len(b"alsook")
+
+
+def test_walk_directory_ignore_unsendable_still_refuses_out_of_root_symlink(
+    tmp_path,
+):
+    """ignore_unsendable=True is for IO/permission noise. Out-of-root
+    symlinks are a privacy-leak risk and must STILL refuse — silently
+    following them would exfiltrate files the user didn't intend."""
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"sensitive")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"normal")
+    (src / "leak").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        walk_directory(str(src), ignore_unsendable=True)

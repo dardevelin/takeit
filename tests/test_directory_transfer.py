@@ -185,3 +185,17 @@ def test_e2e_directory_with_empty_subdirs(tmp_path):
 # rejected here. Post-HYP-392 chunk_hashes ride the subchannel header
 # and that cap is enforced by parse_subchannel_header (see
 # test_subchannel_header.py::test_parse_subchannel_header_rejects_too_many_hashes).
+
+
+# --- HYP-399: --ignore-unsendable-files Click flag ---
+
+
+def test_send_has_ignore_unsendable_files_flag():
+    from click.testing import CliRunner
+
+    from takeit.cli.cli import cmd_send
+
+    runner = CliRunner()
+    result = runner.invoke(cmd_send, ["--help"])
+    assert result.exit_code == 0
+    assert "--ignore-unsendable-files" in result.output

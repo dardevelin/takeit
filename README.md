@@ -111,6 +111,7 @@ where the file is going, and the next attempt resumes from them.
 |------|--------------|
 | `--qr` (sender) | Show a QR code for the takeit code. |
 | `--code-length 4` (sender) | Use a 4-word code instead of 3. |
+| `--ignore-unsendable-files` (sender) | Skip unreadable entries during a directory transfer instead of erroring. |
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |

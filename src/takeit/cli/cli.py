@@ -263,6 +263,16 @@ def main(ctx, debug):
     help="Suppress the progress bar and spinner. Auto-suppressed when "
     "stdout is not a terminal.",
 )
+@click.option(
+    "--ignore-unsendable-files",
+    "ignore_unsendable",
+    is_flag=True,
+    default=False,
+    help="When sending a directory, skip entries that can't be read "
+    "(permission denied, broken symlinks, etc.) instead of erroring "
+    "out. Out-of-root symlinks are STILL refused — that's a privacy "
+    "concern, not an IO concern.",
+)
 @click.pass_context
 def cmd_send(
     ctx,
@@ -275,6 +285,7 @@ def cmd_send(
     qr,
     verify,
     hide_progress,
+    ignore_unsendable,
 ):
     """Send a file, directory, or text.
 
@@ -323,6 +334,7 @@ def cmd_send(
             qr,
             verify,
             hide_progress,
+            ignore_unsendable,
             debug,
         ),
     )
@@ -503,6 +515,7 @@ def _run_send(
     qr,
     verify,
     hide_progress,
+    ignore_unsendable,
     debug,
 ):
     chunk_size = P.DEFAULT_CHUNK_SIZE
@@ -518,7 +531,9 @@ def _run_send(
         # disagree with the source tree the user has since edited.
         dir_name = os.path.basename(os.path.normpath(path))
         click.echo(f"Preparing {dir_name}/ ...")
-        _files, num_files, num_bytes = Z.walk_directory(path)
+        _files, num_files, num_bytes = Z.walk_directory(
+            path, ignore_unsendable=ignore_unsendable
+        )
         # Hold the temp zip alongside the source dir so it's on the same
         # filesystem (avoids ENOSPC surprises in /tmp on small partitions).
         tmp_zip_path = os.path.join(
@@ -527,7 +542,11 @@ def _run_send(
         )
         try:
             size, content_hash, chunk_hashes = yield deferToThread(
-                Z.materialize_and_hash, path, tmp_zip_path, chunk_size
+                Z.materialize_and_hash,
+                path,
+                tmp_zip_path,
+                chunk_size,
+                ignore_unsendable=ignore_unsendable,
             )
             yield _do_send(
                 reactor,
