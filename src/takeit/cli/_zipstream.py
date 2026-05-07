@@ -213,7 +213,17 @@ def materialize_and_hash(root, out_path, chunk_size, *, ignore_unsendable=False)
     chunk_hashes = []
     size = 0
     pending = bytearray()
-    with open(out_path, "wb") as out:
+    # O_CREAT|O_EXCL|O_NOFOLLOW + 0o600: refuse if the path exists
+    # (defeats pre-creation race), refuse if it IS a symlink (defeats
+    # symlink-to-target tricks), and pin 0o600 mode regardless of
+    # umask (no world-readable confidentiality window). HYP-407,
+    # audit #3.
+    fd = os.open(
+        out_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    with os.fdopen(fd, "wb") as out:
         for piece in deterministic_directory_zip(
             root, ignore_unsendable=ignore_unsendable
         ):

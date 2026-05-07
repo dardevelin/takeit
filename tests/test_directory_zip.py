@@ -415,3 +415,57 @@ def test_walk_directory_ignore_unsendable_still_refuses_out_of_root_symlink(
     (src / "leak").symlink_to(outside)
     with pytest.raises(ValueError, match="symlink"):
         walk_directory(str(src), ignore_unsendable=True)
+
+
+# --- HYP-407: sender zip fd safety (O_EXCL / O_NOFOLLOW / 0o600) ---
+
+
+def test_materialize_refuses_pre_existing_path(tmp_path):
+    """O_EXCL: refuse to overwrite a path that already exists.
+    Defeats pre-creation tricks where another local user lays a file
+    in the temp-zip slot to be overwritten."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"hello")
+    out = tmp_path / "out.zip"
+    out.write_bytes(b"already here")
+    with pytest.raises(FileExistsError):
+        materialize_and_hash(str(src), str(out), chunk_size=1 << 20)
+
+
+def test_materialize_refuses_symlink_at_path(tmp_path):
+    """O_NOFOLLOW: refuse to follow a symlink in the temp-zip slot.
+    Defeats symlink-to-target tricks where the attacker would have
+    the zip bytes written to the target instead."""
+    target = tmp_path / "target.txt"
+    target.write_bytes(b"victim")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"hello")
+    out = tmp_path / "out.zip"
+    out.symlink_to(target)
+    with pytest.raises(OSError):
+        materialize_and_hash(str(src), str(out), chunk_size=1 << 20)
+    # Target was NOT touched.
+    assert target.read_bytes() == b"victim"
+
+
+def test_materialize_creates_file_with_0o600_mode(tmp_path):
+    """0o600 mode at create time, regardless of umask. Closes the
+    confidentiality window where a default-umask 0o022 would yield
+    0o644 = world-readable temp zip in a shared dir."""
+    import os
+    import stat
+
+    # Force a permissive umask to confirm the explicit mode wins.
+    old_umask = os.umask(0o000)
+    try:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_bytes(b"hello")
+        out = tmp_path / "out.zip"
+        materialize_and_hash(str(src), str(out), chunk_size=1 << 20)
+        st = os.lstat(str(out))
+        assert stat.S_IMODE(st.st_mode) == 0o600
+    finally:
+        os.umask(old_umask)
