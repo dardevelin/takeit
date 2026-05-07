@@ -656,14 +656,20 @@ def _run_send_text(
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         if explicit_code:
+            # HYP-421: validate BEFORE w.set_code so we don't commit an
+            # unsafe (words-only-no-verify) code into the state machine.
+            # Boss.do_got_code would otherwise derive the legacy tag
+            # and Mailbox would publish before we got to abort.
+            _validate_words_only_handoff(explicit_code, verify)
             w.set_code(explicit_code)
         else:
+            # allocate_code always produces a canonical <locator>:<words>
+            # code post-HYP-406, so no validation needed here.
             w.allocate_code(code_length=code_length)
         code = yield w.get_code()
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
-        _validate_words_only_handoff(code, verify)
         if qr:
             _print_qr(code)
         if verify:
@@ -724,14 +730,18 @@ def _do_send(
     w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         if explicit_code:
+            # HYP-421: validate BEFORE w.set_code so we don't commit an
+            # unsafe (words-only-no-verify) code into the state machine.
+            _validate_words_only_handoff(explicit_code, verify)
             w.set_code(explicit_code)
         else:
+            # allocate_code always produces a canonical <locator>:<words>
+            # code post-HYP-406, so no validation needed here.
             w.allocate_code(code_length=code_length)
         code = yield w.get_code()
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
-        _validate_words_only_handoff(code, verify)
         if qr:
             _print_qr(code)
         if verify:
@@ -1061,21 +1071,34 @@ def _run_receive(
         # code via choose_words, which fires Code.finished_input which
         # fires Boss.got_code and Key.got_code).
         if allocate:
+            # allocate_code always produces a canonical <locator>:<words>
+            # code post-HYP-406, so no validation needed here.
             w.allocate_code(code_length=code_length)
             code = yield w.get_code()
             click.echo(f"takeit code: {code}")
             click.echo("On the sending machine, run:")
             click.echo(f"    takeit send --code {code} <file>")
         elif code is None:
+            # Interactive prompt. HYP-421: pass validate= to the
+            # rlcompleter so the words-only-no-verify check fires
+            # AFTER the user presses Enter but BEFORE the typed code
+            # gets committed to the state machine via choose_words.
             from .. import _rlcompleter
 
             helper = w.input_code()
-            yield _rlcompleter.input_with_completion("takeit code: ", helper, reactor)
+            yield _rlcompleter.input_with_completion(
+                "takeit code: ",
+                helper,
+                reactor,
+                validate=lambda c: _validate_words_only_handoff(c, verify),
+            )
             code = yield w.get_code()
         else:
+            # Positional code given on the CLI. HYP-421: validate
+            # BEFORE w.set_code so we don't commit unsafe shapes
+            # into the state machine.
+            _validate_words_only_handoff(code, verify)
             w.set_code(code)
-
-        _validate_words_only_handoff(code, verify)
 
         if verify:
             yield _confirm_verifier(w)

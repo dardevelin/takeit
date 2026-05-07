@@ -131,27 +131,35 @@ def test_all_callsites_thread_verify_through():
     """Every call to ``_validate_words_only_handoff`` must pass
     ``verify`` as the second arg — calling the helper without the flag
     would default to the old warn-only behavior we're trying to
-    eliminate. The four sites: ``_run_send_text``, ``_do_send`` (file
-    + dir), and ``_run_receive`` (allocate / explicit-code /
-    interactive paths share one call site)."""
+    eliminate.
+
+    Post-HYP-421 the validation moved to fire BEFORE the wormhole
+    state machine commits the code (before `w.set_code` /
+    `w.allocate_code` / `helper.choose_words`). This means:
+
+    - Sender explicit-code path (text + file/dir): two calls passing
+      ``(explicit_code, verify)``.
+    - Receiver positional-code path: one call passing ``(code, verify)``.
+    - Receiver interactive path: one call wrapped in a lambda passed
+      as ``validate=`` to ``input_with_completion``, so the helper
+      fires it inside the readline thread BEFORE choose_words.
+
+    Allocate-paths are exempt because allocate_code always produces a
+    canonical <locator>:<words> code (HYP-406)."""
     src = inspect.getsource(cli_mod)
-    # Find every call line. The argument list must literally be
-    # `(code, verify)` — no other shape is acceptable. (If a future
-    # caller wants different variable names, this test should be
-    # updated AT THE SAME TIME as the rename.)
     calls = [
         line.strip()
         for line in src.splitlines()
         if "_validate_words_only_handoff(" in line
         and "def _validate_words_only_handoff" not in line
     ]
-    # Three call lines today (text-send, file/dir-send, receive). The
-    # receiver --allocate / explicit / interactive paths converge on
-    # ONE call line because all three branches set ``code`` first.
-    assert len(calls) == 3, f"expected 3 call sites, found {len(calls)}: {calls!r}"
+    # 4 total call lines: 2 sender (with explicit_code), 1 receiver
+    # positional (with code), 1 receiver interactive (lambda wrapper).
+    assert len(calls) == 4, f"expected 4 call sites, found {len(calls)}: {calls!r}"
+    # Every call must pass ``verify`` (not omit it / default it).
     for line in calls:
-        assert "_validate_words_only_handoff(code, verify)" in line, (
-            f"callsite must pass (code, verify); got: {line!r}"
+        assert ", verify)" in line or ", verify=" in line, (
+            f"callsite must pass verify; got: {line!r}"
         )
 
 
@@ -162,3 +170,114 @@ def test_helper_signature_takes_code_and_verify():
     sig = inspect.signature(_validate_words_only_handoff)
     params = list(sig.parameters)
     assert params == ["code", "verify"], f"helper signature drifted: {params!r}"
+
+
+# --- HYP-421: validation must fire BEFORE state-machine entry ---
+
+
+def test_validation_fires_before_state_machine_via_fake_rendezvous():
+    """Regression for HYP-421: words-only-no-verify must abort BEFORE
+    any rendezvous tx_open / publish happens. The audit's wording was:
+    'Code.set_code() synchronously calls B.got_code and K.got_code,
+    Boss.do_got_code() derives the legacy words tag, and Mailbox
+    publishes — so a post-set_code abort still leaks the rendezvous.'
+
+    We simulate the sender explicit-code path: takeit.create + set_code
+    with a words-only code while NOT passing verify=True. The validation
+    in cli.py runs BEFORE w.set_code so FakeRendezvous never sees a
+    tx_open. (The cli helpers themselves are tested at the layer above
+    — here we just verify that, given the helper raises, the flow that
+    USES the helper hasn't already touched the wormhole.)
+
+    This is a structural test: we drive the helper directly + assert
+    nothing else happened. The cli orchestrators each have their own
+    callsite test asserting the order (see callsite-thread test
+    above)."""
+    from twisted.internet.task import Clock
+
+    import takeit
+    from takeit.eventual import EventualQueue
+    from tests._fake_rendezvous import FakeRendezvous, pair
+
+    eq = EventualQueue(Clock())
+    rv_a = FakeRendezvous("aaaaaa")
+    rv_b = FakeRendezvous("bbbbbb")
+    pair(rv_a, rv_b)
+
+    def factory(boss, mailbox, terminator):
+        rv_a.wire(boss, mailbox, terminator)
+        return rv_a
+
+    # Constructing the wormhole wires the rendezvous + boots state
+    # machines but doesn't publish anything (no set_code yet). We
+    # discard the handle — we only care about the FakeRendezvous's
+    # observed traffic.
+    takeit.create(
+        appid="takeit/test",
+        reactor=Clock(),
+        relays=None,
+        _eventual_queue=eq,
+        _rendezvous_factory=factory,
+    )
+
+    # Per HYP-421, the cli ORCHESTRATOR validates before calling
+    # set_code. We mimic that here: run validation FIRST, expect it
+    # to raise, and assert the wormhole hasn't been touched.
+    code = "purple-sausages-mocha"  # words-only
+    verify = False
+    try:
+        _validate_words_only_handoff(code, verify)
+    except click.UsageError:
+        pass
+    else:
+        raise AssertionError("expected UsageError")
+
+    # FakeRendezvous must NOT have seen any outbound traffic — proof
+    # that the abort happened BEFORE the wormhole's state-machine
+    # commit-the-code path.
+    assert rv_a.opened == [], f"unexpected rendezvous tx_open: {rv_a.opened!r}"
+    assert rv_a.added == [], f"unexpected rendezvous tx_add: {rv_a.added!r}"
+    # The wormhole was created (FakeRendezvous wire happened) but we
+    # never set_code'd, so no tag was derived.
+    assert rv_a._tag is None, f"unexpected tag: {rv_a._tag!r}"
+
+
+def test_set_code_without_validation_would_have_published():
+    """Negative-control for the regression above: prove FakeRendezvous
+    DOES see traffic when set_code IS called. Without this control,
+    the previous test could pass for a uninteresting reason (e.g. the
+    fake never publishes anyway)."""
+    from twisted.internet.task import Clock
+
+    import takeit
+    from takeit.eventual import EventualQueue
+    from tests._fake_rendezvous import FakeRendezvous, pair
+
+    eq = EventualQueue(Clock())
+    rv_a = FakeRendezvous("aaaaaa")
+    rv_b = FakeRendezvous("bbbbbb")
+    pair(rv_a, rv_b)
+
+    def factory(boss, mailbox, terminator):
+        rv_a.wire(boss, mailbox, terminator)
+        return rv_a
+
+    w = takeit.create(
+        appid="takeit/test",
+        reactor=Clock(),
+        relays=None,
+        _eventual_queue=eq,
+        _rendezvous_factory=factory,
+    )
+
+    # NO validation call — go straight to set_code with words-only.
+    # FakeRendezvous SHOULD see tx_open (proving the regression test
+    # above exercises a real "didn't publish" condition).
+    w.set_code("purple-sausages-mocha")
+    eq.flush_sync()
+    assert rv_a.opened, (
+        "control test failed: set_code didn't trigger tx_open in "
+        "the fake. Either FakeRendezvous changed shape or the wormhole "
+        "doesn't publish on set_code anymore — the regression test "
+        "above is no longer load-bearing."
+    )

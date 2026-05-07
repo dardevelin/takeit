@@ -82,7 +82,7 @@ class CodeInputter:
         self._bcft(self._input_helper.choose_words, code)
 
 
-def _input_code_with_completion(prompt, input_helper, reactor):
+def _input_code_with_completion(prompt, input_helper, reactor, validate=None):
     # reminder: this all occurs in a separate thread. All calls to input_helper
     # must go through blockingCallFromThread()
     c = CodeInputter(input_helper, reactor)
@@ -99,6 +99,13 @@ def _input_code_with_completion(prompt, input_helper, reactor):
     code = input(prompt)
     if isinstance(code, bytes):
         code = code.decode("utf-8")
+    # Run caller-supplied validation BEFORE c.finish (HYP-421). c.finish
+    # synchronously fires input_helper.choose_words → Code.finished_input
+    # → Boss/Key got_code, which kicks the wormhole into the rendezvous-
+    # and-PAKE path. If we validate after c.finish, we've already
+    # published our presence on a potentially unsafe (words-only) tag.
+    if validate is not None:
+        validate(code)
     c.finish(code)
     return c.used_completion
 
@@ -114,10 +121,18 @@ def warn_readline():  # pragma: no cover
 
 
 @inlineCallbacks
-def input_with_completion(prompt, input_helper, reactor):
+def input_with_completion(prompt, input_helper, reactor, validate=None):
+    """Drive the readline-prompted code entry on a worker thread.
+
+    `validate(code)` if given is called AFTER the user presses Enter
+    but BEFORE the typed code is committed to the wormhole state
+    machine. Raise from `validate` to abort cleanly without entering
+    the rendezvous path. Used by takeit.cli for HYP-421's words-only
+    refusal that must fire pre-commit.
+    """
     t = reactor.addSystemEventTrigger("before", "shutdown", warn_readline)
     used_completion = yield deferToThread(
-        _input_code_with_completion, prompt, input_helper, reactor
+        _input_code_with_completion, prompt, input_helper, reactor, validate
     )
     reactor.removeSystemEventTrigger(t)
     return used_completion
