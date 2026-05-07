@@ -485,6 +485,10 @@ def cmd_completion(shell):
 # Aliases — Click groups don't support aliasing directly, so register again.
 main.add_command(cmd_send, name="tx")
 main.add_command(cmd_receive, name="rx")
+# `recv` is shell-muscle-memory; `recieve` is the typo-tolerant alias
+# that upstream wormhole introduced. Both route to cmd_receive.
+main.add_command(cmd_receive, name="recv")
+main.add_command(cmd_receive, name="recieve")
 
 
 # ---- shared error handling ----
