@@ -1390,17 +1390,41 @@ class _ReceiverProtocol(Protocol):
         self._stopped = False
 
     def connectionMade(self):
-        # Open the partial file in r+b. If it doesn't exist (fresh
-        # transfer), create it via O_CREAT|O_EXCL|O_NOFOLLOW so we don't
-        # follow a same-user-attacker symlink and we set 0600 perms from
-        # the start (no umask 022 → world-readable window).
+        # Open the partial file safely. The audit (HYP-408) found two
+        # symlink/race holes here: closing the fd and reopening by path
+        # lost the O_NOFOLLOW guarantee, and the resume path had no
+        # symlink protection at all. Fix: keep the original fd via
+        # os.fdopen, and on the resume branch lstat+fstat cross-check
+        # so a swap-after-stat can't slip through.
         partial = self._factory._partial_path
-        if not os.path.exists(partial):
+        if self._factory._prior_matches:
+            # Resume: partial should already exist. O_NOFOLLOW refuses
+            # if a symlink got pre-staged in our slot; the cross-check
+            # catches a real-file swap that happened between the
+            # caller's resume-state probe and now.
+            fd = os.open(partial, os.O_RDWR | os.O_NOFOLLOW)
+            try:
+                lst = os.lstat(partial)
+                fst = os.fstat(fd)
+                if lst.st_ino != fst.st_ino or lst.st_dev != fst.st_dev:
+                    raise OSError(
+                        f"partial file {partial!r} was swapped between "
+                        f"lstat and open (inode {lst.st_ino} vs {fst.st_ino})"
+                    )
+            except BaseException:
+                os.close(fd)
+                raise
+        else:
+            # Fresh: create with O_EXCL|O_NOFOLLOW + 0o600. If the path
+            # already exists OR is a symlink, fail loud — upstream code
+            # is responsible for the "stale partial" cleanup before we
+            # get here.
             fd = os.open(
-                partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+                partial,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
             )
-            os.close(fd)
-        self._fh = open(partial, "r+b")
+        self._fh = os.fdopen(fd, "r+b")
 
     def dataReceived(self, data):
         if self._stopped:
