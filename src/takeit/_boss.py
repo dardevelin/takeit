@@ -8,6 +8,7 @@ from zope.interface import implementer
 
 from . import _interfaces
 from ._code import Code, validate_code
+from ._code_format import encode_locator, generate_locator, parse_code
 from ._dilation.manager import Dilator
 from ._input import Input
 from ._key import Key
@@ -16,7 +17,7 @@ from ._order import Order
 from ._receive import Receive
 from ._send import Send
 from ._status import AllegedSharedKey, Closed, ConfirmedKey, WormholeStatus
-from ._tag import derive_tag
+from ._tag import derive_tag, derive_tag_legacy_words
 from ._terminator import Terminator
 from ._wordlist import PGPWordList
 from .errors import (
@@ -195,7 +196,11 @@ class Boss:
         if self._did_start_code:
             raise OnlyOneCodeError()
         self._did_start_code = True
-        self._C.allocate_code(code_length, PGPWordList())
+        # Mint a fresh 16-byte locator. The user-facing code becomes
+        # `<base32-locator>:<words>` (HYP-406): locator carries the
+        # public Nostr routing tag, words are the SPAKE2 password.
+        locator_b32 = encode_locator(generate_locator())
+        self._C.allocate_code(code_length, PGPWordList(), locator_b32=locator_b32)
 
     def set_code(self, code):
         validate_code(code)  # raises KeyFormatError on bad format
@@ -310,8 +315,21 @@ class Boss:
     def do_got_code(self, code):
         # Boss is the orchestrator that knows about routing tags. State
         # machines below it (Code, Key) only know the user-visible code.
+        #
+        # Post-HYP-406, the code is one of two shapes:
+        # - canonical `<base32-locator>:<words>` → tag from locator
+        #   (canonical path, no oracle).
+        # - words-only → tag from words via legacy domain-separated
+        #   path. Words-only handoff is vulnerable to relay-mediated
+        #   MITM unless --verify is used; the CLI is responsible for
+        #   warning the user. Boss just routes the bytes.
         self._wormhole.got_code(code)
-        self._M.got_tag(derive_tag(code))
+        locator, words = parse_code(code)
+        if locator is not None:
+            tag = derive_tag(locator)
+        else:
+            tag = derive_tag_legacy_words(words)
+        self._M.got_tag(tag)
 
     @m.output()
     def process_version(self, plaintext):

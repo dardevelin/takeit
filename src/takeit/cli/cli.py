@@ -663,6 +663,7 @@ def _run_send_text(
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
+        _warn_if_words_only(code)
         if qr:
             _print_qr(code)
         if verify:
@@ -730,6 +731,7 @@ def _do_send(
         click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
+        _warn_if_words_only(code)
         if qr:
             _print_qr(code)
         if verify:
@@ -1065,6 +1067,8 @@ def _run_receive(
             code = yield w.get_code()
         else:
             w.set_code(code)
+
+        _warn_if_words_only(code)
 
         if verify:
             yield _confirm_verifier(w)
@@ -1576,6 +1580,25 @@ def _pretty_size(n):
         if f < 1024 or u == units[-1]:
             return f"{f:.1f} {u}" if u != "B" else f"{int(n)} B"
         f /= 1024
+
+
+def _warn_if_words_only(code):
+    """Print a stderr warning if `code` is words-only (no locator).
+
+    Words-only handoff is vulnerable to relay-mediated MITM (HYP-406):
+    a hostile relay can precompute every 3-word → tag mapping and
+    actively interpose. Mandatory verifier comparison via --verify is
+    the only mitigation. We print the warning at every site that
+    resolves a code so the user gets exactly one notice per session.
+    """
+    if ":" not in code:
+        click.echo(
+            "Warning: words-only code handoff. A hostile Nostr relay "
+            "could intercept this transfer. Use --verify on BOTH sides "
+            "and compare the authentication string out-of-band before "
+            "accepting the file.",
+            err=True,
+        )
 
 
 def format_verifier(verifier):

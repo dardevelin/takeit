@@ -19,14 +19,18 @@
 ```sh
 # you, the sender
 $ takeit send report.pdf
-takeit code: purple-sausages-mocha
+takeit code: nbswy3dpo5xxe3deebsxe5dpor4q:purple-sausages-mocha
 
-# them, the receiver — type the code
-$ takeit receive purple-sausages-mocha
+# them, the receiver — paste the code (or scan a QR)
+$ takeit receive nbswy3dpo5xxe3deebsxe5dpor4q:purple-sausages-mocha
 Offered: report.pdf (3.2 MiB)
 Accept? [y/N]: y
 Saved /Users/them/Downloads/report.pdf.
 ```
+
+The code's two parts are: a long random locator (carries the routing
+tag, useless to anyone but the receiver) and a short three-word
+password. Paste it as a single string, or use `--qr` and scan it.
 
 The file goes from your computer to theirs, **directly**. Nothing in
 between gets a copy.
@@ -63,7 +67,7 @@ takeit send report.pdf --qr
 ### Receive a file
 
 ```sh
-takeit receive purple-sausages-mocha
+takeit receive nbswy3dpo5xxe3deebsxe5dpor4q:purple-sausages-mocha
 ```
 
 Or, if you don't want to type the whole code at once:
@@ -90,12 +94,12 @@ receiver allocates the code:
 ```sh
 # you, the receiver
 $ takeit receive --allocate
-takeit code: copper-orbit-staircase
+takeit code: jbswy3dpo5xxe3deebsxe5dpor4q:copper-orbit-staircase
 On the sending machine, run:
-    takeit send --code copper-orbit-staircase <file>
+    takeit send --code jbswy3dpo5xxe3deebsxe5dpor4q:copper-orbit-staircase <file>
 
-# them, the sender — type the code
-$ takeit send --code copper-orbit-staircase report.pdf
+# them, the sender — type or paste the code
+$ takeit send --code jbswy3dpo5xxe3deebsxe5dpor4q:copper-orbit-staircase report.pdf
 ```
 
 ### Got cut off mid-transfer?
@@ -199,13 +203,19 @@ Delegate-mode wormholes, `dilate()` for bulk-data subchannels,
 
 ### How it works under the hood
 
-1. The sender generates a three-word code (e.g. `purple-sausages-mocha`).
-2. Both clients derive the same routing tag from the code via
-   `HKDF-SHA256` and subscribe to it on a public Nostr relay.
-3. They run **SPAKE2** over a small handful of ephemeral Nostr events,
-   producing a shared secret. The takeit code is the only password —
-   SPAKE2's online-only-one-guess property makes it resistant to brute
-   force.
+1. The sender generates a fresh 128-bit random *locator* and a short
+   three-word password from a wordlist. The full code shown to the
+   user is `<base32-locator>:<words>` (e.g.
+   `nbswy3dpo5xxe3deebsxe5dpor4q:purple-sausages-mocha`).
+2. The locator (NOT the words) is fed through `HKDF-SHA256` to produce
+   the public Nostr routing tag. Both clients subscribe to that tag on
+   a public Nostr relay to find each other. Since the locator is 128
+   random bits, a relay cannot brute-force it the way it could with
+   short words alone.
+3. The peers run **SPAKE2** over a small handful of ephemeral Nostr
+   events, using the words as the password, producing a shared secret.
+   SPAKE2's online-only-one-guess property keeps the words safe even
+   though they're short.
 4. They exchange direct connection candidates (LAN addresses +
    STUN-derived public IPs) and open a direct, **Noise**-encrypted,
    multiplexed TCP connection.
@@ -246,10 +256,12 @@ resume logic, security defenses, and CLI behavior. See
 
 - **Multi-file send is one-shot.** `takeit send a b c` (multiple
   positionals) is not supported — pass a directory instead.
-- **Privacy: the routing tag is HKDF-deterministic.** A relay operator
-  can precompute every possible `(code → tag)` mapping and detect
-  specific codes in use. Doesn't enable a man-in-the-middle, but it's
-  an observation channel.
+- **Words-only handoff requires `--verify`.** Default takeit codes are
+  `<long-random-locator>:<short-words>` and are MITM-resistant out of
+  the box. If you handed off ONLY the words (no QR / no full code),
+  takeit will print a warning — you MUST use `--verify` on both sides
+  and compare the authentication string out-of-band, otherwise a
+  hostile Nostr relay could intercept the transfer.
 - **NAT traversal is direct-only.** Symmetric NATs without a
   port-forward will fail; no transit-relay fallback.
 

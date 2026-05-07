@@ -114,7 +114,9 @@ def test_deferred_mode_full_handshake_and_message_exchange():
     code_d = a.get_code()
     code = _resolve(eq, code_d)
     assert isinstance(code, str)
-    assert code.count("-") == 2
+    # Post-HYP-406 shape: <26-base32-locator>:<word1-word2-word3>
+    assert code.count(":") == 1
+    assert code.split(":", 1)[1].count("-") == 2
 
     b.set_code(code)
     _flush(eq)
@@ -268,18 +270,41 @@ def test_derive_key_rejects_non_string_purpose():
 
 
 def test_default_code_length_is_three():
-    """takeit's default code is 3 words."""
+    """takeit's default code is 3 words.
+
+    Post-HYP-406 the full code shape is `<26-base32-locator>:<words>`.
+    We assert the SHAPE here: one colon, words section has 3 words
+    (2 hyphens), locator section is 26 base32 chars.
+    """
     eq, a, _ = _make_wormhole_pair()
     a.allocate_code()  # no length argument
     code = _resolve(eq, a.get_code())
-    assert code.count("-") == 2  # 3 words
+    assert code.count(":") == 1  # locator:words separator
+    locator_b32, words = code.split(":", 1)
+    assert len(locator_b32) == 26  # 16 bytes → 26 base32 chars
+    assert words.count("-") == 2  # 3 words
 
 
 def test_code_length_can_be_overridden():
     eq, a, _ = _make_wormhole_pair()
     a.allocate_code(code_length=4)
     code = _resolve(eq, a.get_code())
-    assert code.count("-") == 3  # 4 words
+    _, words = code.split(":", 1)
+    assert words.count("-") == 3  # 4 words
+
+
+def test_allocated_code_uses_canonical_locator_words_shape():
+    """Sender-allocated codes always have the locator prefix; words-only
+    handoff is opt-in by the receiver typing only words."""
+    from takeit._code_format import parse_code
+
+    eq, a, _ = _make_wormhole_pair()
+    a.allocate_code()
+    code = _resolve(eq, a.get_code())
+    locator, words = parse_code(code)
+    assert locator is not None
+    assert len(locator) == 16  # full 128-bit locator
+    assert words  # non-empty words section
 
 
 # --- relays argument ---

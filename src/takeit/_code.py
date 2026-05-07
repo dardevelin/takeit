@@ -74,15 +74,23 @@ class Code:
     def _set_code(self, code):
         pass
 
-    def allocate_code(self, length, wordlist):
+    def allocate_code(self, length, wordlist, locator_b32=None):
         """Locally generate a code from `wordlist` and commit it.
+
+        When `locator_b32` is given, the chosen code becomes
+        ``<locator_b32>:<words>`` — the canonical post-HYP-406 shape
+        where the locator carries the public Nostr routing tag and
+        the words are the PAKE password. When `locator_b32` is None,
+        legacy words-only handoff (for tests or callers that haven't
+        migrated; the public API path always provides a locator).
 
         Synchronous: by the time this returns, `B.got_code` and `K.got_code`
         have been called.
         """
         if length < 1:
             raise ValueError("length must be >= 1")
-        code = wordlist.choose_words(length)
+        words = wordlist.choose_words(length)
+        code = f"{locator_b32}:{words}" if locator_b32 else words
         self._set_code(code)
 
     # from Input
