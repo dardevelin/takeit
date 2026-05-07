@@ -21,11 +21,13 @@ from twisted.python import log
 import takeit
 from takeit.cli import _protocol as P
 from takeit.cli import _resume as R
+from takeit.cli import _spinner as Sp
 from takeit.errors import KeyFormatError, WrongPasswordError
 
 
 def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer"):
-    """Build a tqdm progress bar configured for byte-rate display.
+    """Build a tqdm progress bar configured for byte-rate display, with
+    a tumbling-block prefix (Yobi) whose rotation rate tracks throughput.
 
     Returns a no-op shim if stdout isn't a TTY so tqdm doesn't paint
     progress lines into log files / pipes / CI runs. The shim has the
@@ -38,15 +40,54 @@ def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer"):
             def __enter__(self): return self
             def __exit__(self, *a): return False
         return _Noop()
-    return tqdm_module.tqdm(
+    bar = tqdm_module.tqdm(
         total=total_bytes,
         initial=initial_bytes,
         unit="B",
         unit_scale=True,
         unit_divisor=1024,
-        desc=desc,
+        desc=f"{Sp.rotate_glyph(initial_bytes)} {desc}",
         leave=False,
     )
+    return _SpinningBar(bar, desc, initial_bytes)
+
+
+class _SpinningBar:
+    """Wraps a tqdm bar and rotates a small block-glyph prefix on each
+    update, so the bar visibly speeds up with throughput.
+
+    The rotation step is byte-count-driven (one step per ~512 KiB by
+    default), so a faster transfer ticks the glyph faster — the spinner
+    tracks bytes/sec without us computing rates.
+    """
+
+    def __init__(self, bar, label, initial_bytes):
+        self._bar = bar
+        self._label = label
+        self._seen = initial_bytes
+        self._last_glyph_step = self._seen // Sp._BYTES_PER_ROTATION_STEP
+
+    def update(self, n):
+        self._bar.update(n)
+        self._seen += n
+        step = self._seen // Sp._BYTES_PER_ROTATION_STEP
+        if step != self._last_glyph_step:
+            self._last_glyph_step = step
+            # set_description_str avoids appending ": " (set_description does).
+            self._bar.set_description_str(
+                f"{Sp.rotate_glyph(self._seen)} {self._label}",
+                refresh=False,
+            )
+
+    def close(self):
+        self._bar.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+        return False
 
 
 APPID = "takeit/file-xfer"
@@ -216,7 +257,7 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         else:
             w.allocate_code(code_length=code_length)
         code = yield w.get_code()
-        click.echo(f"Wormhole code: {code}")
+        click.echo(f"takeit code: {code}")
         click.echo("On the receiving machine, run:")
         click.echo(f"    takeit receive {code}")
         if qr:
@@ -227,8 +268,16 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
             filename, size, content_hash, chunk_hashes, chunk_size=chunk_size)
         w.send_message(P.encode_message(offer_msg))
 
-        # Wait for the answer (which may include resumed chunk indices)
-        answer_payload = yield w.get_message()
+        # Wait for the answer (which may include resumed chunk indices).
+        # Run the toss-and-spin spinner during this wait — receiver may be
+        # typing the code, deciding whether to accept, etc. Stop and clear
+        # the spinner before any further output.
+        spinner = Sp.TossSpinner(reactor)
+        spinner.start()
+        try:
+            answer_payload = yield w.get_message()
+        finally:
+            spinner.stop()
         accepted, reason, chunks_have = P.parse_answer(answer_payload)
         if not accepted:
             click.echo(f"Receiver declined: {reason}", err=True)
@@ -242,10 +291,17 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
             click.echo(f"Resuming: receiver already has {skipped} chunk(s); "
                        f"sending {len(chunks_to_send)}")
 
-        # Dilate and stream the file body over a subchannel
-        dw = w.dilate()
-        yield dw.when_dilated()
-        ep = dw.connector_for(P.SUBCHANNEL_NAME)
+        # Dilate and stream the file body over a subchannel. Spin during
+        # the handshake — STUN candidates racing, Noise prologue, KCM
+        # selection — brief on LAN, longer on slow links.
+        spinner = Sp.TossSpinner(reactor)
+        spinner.start()
+        try:
+            dw = w.dilate()
+            yield dw.when_dilated()
+            ep = dw.connector_for(P.SUBCHANNEL_NAME)
+        finally:
+            spinner.stop()
         click.echo(f"Sending {filename} ({_pretty_size(size)})...")
         # Bytes to send = sum of remaining chunk sizes. The last chunk may
         # be short — compute against actual sizes, not chunk_size * count.
@@ -434,7 +490,16 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             code = yield w.get_code()
         else:
             w.set_code(code)
-        offer_payload = yield w.get_message()
+
+        # Wait for the sender's offer. The sender may be hashing a large
+        # file before they can publish — for a 10 GB source this is ~20 s.
+        # Spinner makes the wait feel intentional rather than hung.
+        spinner = Sp.TossSpinner(reactor)
+        spinner.start()
+        try:
+            offer_payload = yield w.get_message()
+        finally:
+            spinner.stop()
         offer = P.parse_offer(offer_payload)
         click.echo(
             f"Offered: {offer['filename']} ({_pretty_size(offer['size'])})")
@@ -521,9 +586,17 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         w.send_message(P.encode_message(
             P.build_answer(True, chunks_have=chunks_have)))
 
-        dw = w.dilate()
-        yield dw.when_dilated()
-        listener_ep = dw.listener_for(P.SUBCHANNEL_NAME)
+        # Spinner during the dilation handshake — the peer is finishing
+        # the SPAKE2 confirmation and we're racing connection candidates.
+        # Brief on a fast LAN, longer on slow links.
+        spinner = Sp.TossSpinner(reactor)
+        spinner.start()
+        try:
+            dw = w.dilate()
+            yield dw.when_dilated()
+            listener_ep = dw.listener_for(P.SUBCHANNEL_NAME)
+        finally:
+            spinner.stop()
         click.echo(f"Receiving into {dest_path}...")
         # Initial bytes already on disk (resumed) shown as "starting at"
         # so the bar reaches 100% at the offer's full size.
