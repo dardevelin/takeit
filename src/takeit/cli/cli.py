@@ -392,6 +392,16 @@ def cmd_send(
     "sender to type it (the inverse of the default direction).",
 )
 @click.option(
+    "-t",
+    "--only-text",
+    "only_text",
+    is_flag=True,
+    default=False,
+    help="Refuse any incoming file or directory transfer; only accept "
+    "inline text offers. Useful for scripted use where the receiver "
+    "knows it's expecting a chat message.",
+)
+@click.option(
     "--code-length",
     "code_length",
     type=int,
@@ -408,6 +418,7 @@ def cmd_receive(
     verify,
     hide_progress,
     allocate,
+    only_text,
     code_length,
 ):
     """Receive a file using a code.
@@ -441,6 +452,7 @@ def cmd_receive(
             verify,
             hide_progress,
             allocate,
+            only_text,
             code_length,
             ctx.obj.get("debug", False),
         ),
@@ -1002,6 +1014,7 @@ def _run_receive(
     verify,
     hide_progress,
     allocate,
+    only_text,
     code_length,
     debug,
 ):
@@ -1064,6 +1077,13 @@ def _run_receive(
         offer = P.parse_offer(offer_payload)
         if offer["kind"] not in (P.KIND_FILE, P.KIND_DIRECTORY, P.KIND_TEXT):
             reason = f"{offer['kind']} transfer not yet supported by this client"
+            w.send_message(P.encode_message(P.build_answer(False, reason)))
+            click.echo(f"Error: {reason}", err=True)
+            yield w.close()
+            sys.exit(1)
+
+        if only_text and offer["kind"] != P.KIND_TEXT:
+            reason = f"--only-text refuses {offer['kind']} transfers"
             w.send_message(P.encode_message(P.build_answer(False, reason)))
             click.echo(f"Error: {reason}", err=True)
             yield w.close()

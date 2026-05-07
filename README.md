@@ -116,6 +116,7 @@ where the file is going, and the next attempt resumes from them.
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |
 | `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <words>`. |
+| `-t` / `--only-text` (receiver) | Refuse incoming files/directories; only accept `--text` messages. |
 | `--hide-progress` (both) | Suppress the progress bar and spinner. Auto-suppressed when stdout isn't a terminal. |
 | `--debug` | Show full error details if something goes wrong. |
 
