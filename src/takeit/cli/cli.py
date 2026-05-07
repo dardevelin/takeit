@@ -127,8 +127,11 @@ def main(ctx, debug):
 
 
 @main.command("send")
-@click.argument("path", type=click.Path(exists=True, dir_okay=True,
-                                        readable=True, resolve_path=True))
+@click.argument("path", required=False,
+                type=click.Path(dir_okay=True, resolve_path=True))
+@click.option("--text", "text_input", default=None,
+              help="Send a short text message instead of a file. "
+                   "Use '-' to read the text from stdin.")
 @click.option("--code-length", type=int, default=3,
               help="Number of words in the generated code (default: 3).")
 @click.option("--relay", "relays", multiple=True,
@@ -141,15 +144,36 @@ def main(ctx, debug):
               help="Also render the code as a terminal QR code "
                    "(useful for hand-off to a phone).")
 @click.pass_context
-def cmd_send(ctx, path, code_length, relays, explicit_code, no_cache, qr):
-    """Send a file or directory.
+def cmd_send(ctx, path, text_input, code_length, relays,
+             explicit_code, no_cache, qr):
+    """Send a file, directory, or text.
 
     Directories are streamed as a deterministic zip — the receiver
-    expands them on arrival. Resume works for both kinds.
+    expands them on arrival. Resume works for files and directories.
+    Use ``--text`` to send a short text message inline.
     """
+    if text_input is not None and path is not None:
+        raise click.UsageError(
+            "--text and a file path are mutually exclusive")
+    if text_input is None and path is None:
+        raise click.UsageError("Provide a path or --text")
     relay_list = list(relays) if relays else None
+    debug = ctx.obj.get("debug", False)
+    if text_input is not None:
+        # Read from stdin if the value is "-".
+        text = sys.stdin.read() if text_input == "-" else text_input
+        react(_run_send_text,
+              (text, code_length, relay_list, explicit_code, qr, debug))
+        return
+    # Path validation runs here (not in the Click annotation) so that
+    # --text vs path mutual-exclusion can fire first with a clear
+    # error, regardless of whether `path` exists on disk.
+    if not os.path.exists(path):
+        raise click.UsageError(f"Path {path!r} does not exist")
+    if not os.access(path, os.R_OK):
+        raise click.UsageError(f"Path {path!r} is not readable")
     react(_run_send, (path, code_length, relay_list, explicit_code,
-                      not no_cache, qr, ctx.obj.get("debug", False)))
+                      not no_cache, qr, debug))
 
 
 @main.command("receive")
@@ -295,6 +319,52 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         reactor, path, filename, size, content_hash, chunk_hashes,
         chunk_size, code_length, relays, explicit_code, qr, debug,
         kind=P.KIND_FILE)
+
+
+@inlineCallbacks
+def _run_send_text(reactor, text, code_length, relays, explicit_code,
+                   qr, debug):
+    """Send a text message inline. The offer IS the payload — no
+    chunked stream, no dilation. Same accept/decline gate as files
+    so the receiver still gets to consent before the text appears."""
+    w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
+    try:
+        if explicit_code:
+            w.set_code(explicit_code)
+        else:
+            w.allocate_code(code_length=code_length)
+        code = yield w.get_code()
+        click.echo(f"takeit code: {code}")
+        click.echo("On the receiving machine, run:")
+        click.echo(f"    takeit receive {code}")
+        if qr:
+            _print_qr(code)
+
+        offer_msg = P.build_offer_text(text)
+        w.send_message(P.encode_message(offer_msg))
+
+        # Wait for receiver's accept/decline.
+        spinner = Sp.TossSpinner(reactor)
+        spinner.start()
+        try:
+            answer_payload = yield w.get_message()
+        finally:
+            spinner.stop()
+        accepted, reason, _chunks_have = P.parse_answer(answer_payload)
+        if not accepted:
+            click.echo(f"Receiver declined: {reason}", err=True)
+            yield w.close()
+            sys.exit(1)
+
+        # Same complete/done handshake as file/directory transfers.
+        # Keeps the close protocol uniform across kinds.
+        w.send_message(P.encode_message(P.build_complete()))
+        done_payload = yield w.get_message()
+        P.parse_simple_flag(done_payload, "done")
+        click.echo("Text delivered.")
+        yield w.close()
+    except Exception as exc:
+        sys.exit(_handle_cli_error(exc, debug))
 
 
 @inlineCallbacks
@@ -581,15 +651,38 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         finally:
             spinner.stop()
         offer = P.parse_offer(offer_payload)
-        if offer["kind"] not in (P.KIND_FILE, P.KIND_DIRECTORY):
-            # Text mode is tracked separately — HYP-389. Schema is in
-            # place; receiver path is not yet wired. Refuse cleanly so
-            # the sender sees a useful error instead of a hang.
+        if offer["kind"] not in (
+                P.KIND_FILE, P.KIND_DIRECTORY, P.KIND_TEXT):
             reason = f"{offer['kind']} transfer not yet supported by this client"
             w.send_message(P.encode_message(P.build_answer(False, reason)))
             click.echo(f"Error: {reason}", err=True)
             yield w.close()
             sys.exit(1)
+
+        if offer["kind"] == P.KIND_TEXT:
+            text = offer["text"]
+            click.echo(
+                f"Offered: text message ({len(text)} character(s))")
+            if not auto_accept:
+                if not click.confirm("Show?", default=True):
+                    w.send_message(P.encode_message(
+                        P.build_answer(False, "user declined")))
+                    yield w.close()
+                    return
+            w.send_message(P.encode_message(P.build_answer(True)))
+            # Print the text exactly as sent — no quoting, no extra
+            # newline beyond what the sender included.
+            click.echo(text, nl=False)
+            # If the sender's text didn't end with a newline, finish
+            # the line so the user's prompt isn't glued to the message.
+            if not text.endswith("\n"):
+                click.echo()
+            # Same close handshake as file/dir for protocol uniformity.
+            complete_payload = yield w.get_message()
+            P.parse_simple_flag(complete_payload, "complete")
+            w.send_message(P.encode_message(P.build_done()))
+            yield w.close()
+            return
 
         if offer["kind"] == P.KIND_FILE:
             display_name = offer["filename"]

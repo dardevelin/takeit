@@ -14,7 +14,7 @@
 
 # takeit
 
-**Send a file or folder to someone. No accounts, no upload to a cloud, no fuss.**
+**Send a file, folder, or message to someone. No accounts, no upload to a cloud, no fuss.**
 
 ```sh
 # you, the sender
@@ -41,16 +41,18 @@ That's it. You now have a `takeit` command. (Python 3.10 or newer.)
 
 ## Use it
 
-### Send a file or directory
+### Send a file, directory, or text
 
 ```sh
 takeit send report.pdf
 takeit send my_project/
+takeit send --text "the meeting is at 3pm"
 ```
 
 You'll see a three-word code. Tell it to the other person — say it,
 text it, paste it, scan it. Directories are streamed as a single
-deterministic zip — the receiver expands them on arrival.
+deterministic zip — the receiver expands them on arrival. Text is
+inline — the receiver prints it to their terminal.
 
 ```sh
 takeit send report.pdf --qr
@@ -208,8 +210,6 @@ resume logic, security defenses, and CLI behavior. See
 
 - **Multi-file send is one-shot.** `takeit send a b c` (multiple
   positionals) is not supported — pass a directory instead.
-- **No text mode.** No `takeit send --text "msg"` yet. Same shape as
-  the file path: an offer with the text inline; small CLI work.
 - **No verifier (SAS) display.** takeit computes a short verification
   string but the CLI doesn't surface it for paranoid out-of-band
   comparison.
