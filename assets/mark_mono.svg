@@ -1,0 +1,15 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <title>TakeIt — the Mark, monochrome</title>
+  <desc>Single-color version of the parcel silhouette with the tape cross knocked out.</desc>
+
+  <g transform="translate(32 32) rotate(-6) translate(-22 -22)">
+    <!-- body filled in currentColor -->
+    <path d="M 2 4 Q 2 0 6 0 L 38 0 Q 42 0 42 4 L 44 40 Q 44 44 40 44 L 4 44 Q 0 44 0 40 Z"
+          fill="currentColor"
+          fill-rule="evenodd"/>
+    <!-- tape cross knocked out as a single subtractive shape using fill-rule -->
+    <path d="M 19 0 h 6 v 17 h 19 v 6 h -19 v 21 h -6 v -21 h -19 v -6 h 19 z"
+          fill="#000"
+          style="mix-blend-mode: destination-out"/>
+  </g>
+</svg>

@@ -1,0 +1,18 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <title>TakeIt — the Mark</title>
+  <desc>Faceless geometric reduction of Yobi, the parcel silhouette with the tape cross.</desc>
+
+  <!-- The Mark: just the parcel shape with the tape cross.
+       Sized to look right at 16-29px. The slight tilt is preserved as the
+       only personality cue — at this size, geometry is character. -->
+
+  <g transform="translate(32 32) rotate(-6) translate(-22 -22)">
+    <!-- body -->
+    <path d="M 2 4 Q 2 0 6 0 L 38 0 Q 42 0 42 4 L 44 40 Q 44 44 40 44 L 4 44 Q 0 44 0 40 Z"
+          fill="currentColor"/>
+    <!-- tape cross (cut out via overlay in the same color as background — but for currentColor use,
+         we do it as a stroke-style detail that reads even at 16px) -->
+    <rect x="19" y="0" width="6" height="44" fill="#3D27A8" opacity="1"/>
+    <rect x="0" y="17" width="44" height="6" fill="#3D27A8" opacity="1"/>
+  </g>
+</svg>

@@ -1,0 +1,54 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <title>TakeIt — app icon</title>
+  <desc>Yobi mascot centered on a violet rounded square, in the calling pose — open mouth, signal arcs above.</desc>
+
+  <!-- canvas: violet rounded square (iOS will mask the corners further) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="#5B3FD9"/>
+
+  <!-- subtle deep-violet vignette circle behind Yobi for depth without gradient -->
+  <circle cx="512" cy="540" r="380" fill="#3D27A8" opacity="0.35"/>
+
+  <!-- signal arcs: Nostr handshake calling outward -->
+  <!-- left side -->
+  <path d="M 312 360 Q 268 380 252 432" stroke="#F4F1EC" stroke-width="14" fill="none" stroke-linecap="round" opacity="0.9"/>
+  <path d="M 268 320 Q 196 348 168 432" stroke="#F4F1EC" stroke-width="12" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <!-- right side -->
+  <path d="M 712 360 Q 756 380 772 432" stroke="#F4F1EC" stroke-width="14" fill="none" stroke-linecap="round" opacity="0.9"/>
+  <path d="M 756 320 Q 828 348 856 432" stroke="#F4F1EC" stroke-width="12" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <!-- top -->
+  <path d="M 488 268 Q 500 232 512 224" stroke="#F4F1EC" stroke-width="14" fill="none" stroke-linecap="round" opacity="0.9"/>
+  <path d="M 536 268 Q 524 232 512 224" stroke="#F4F1EC" stroke-width="14" fill="none" stroke-linecap="round" opacity="0.9"/>
+
+  <!-- Yobi body, centered, calling pose -->
+  <g transform="translate(512 560)">
+    <!-- ground shadow -->
+    <ellipse cx="0" cy="252" rx="220" ry="22" fill="#1A1726" opacity="0.18"/>
+
+    <!-- body -->
+    <g transform="translate(-220 -220)">
+      <path d="M 24 20 Q 24 0 44 0 L 396 0 Q 416 0 416 20 L 436 420 Q 436 440 416 440 L 24 440 Q 4 440 4 420 Z"
+            fill="#F4F1EC"/>
+      <path d="M 24 20 Q 24 0 44 0 L 396 0 Q 416 0 416 20 L 436 420 Q 436 440 416 440 L 24 440 Q 4 440 4 420 Z"
+            fill="none" stroke="#1A1726" stroke-width="6"/>
+
+      <!-- tape vertical -->
+      <rect x="196" y="0" width="54" height="440" fill="#3D27A8"/>
+      <!-- tape horizontal -->
+      <rect x="4" y="150" width="432" height="44" fill="#3D27A8"/>
+
+      <!-- cheeks -->
+      <ellipse cx="116" cy="290" rx="34" ry="22" fill="#FF8A6B"/>
+      <ellipse cx="324" cy="290" rx="34" ry="22" fill="#FF8A6B"/>
+
+      <!-- eyes (calling: looking up + slightly wide) -->
+      <ellipse cx="138" cy="252" rx="17" ry="22" fill="#1A1726"/>
+      <ellipse cx="302" cy="252" rx="17" ry="22" fill="#1A1726"/>
+      <!-- eye shines -->
+      <circle cx="142" cy="244" r="5" fill="#F4F1EC"/>
+      <circle cx="306" cy="244" r="5" fill="#F4F1EC"/>
+
+      <!-- mouth: small open oval, calling -->
+      <ellipse cx="220" cy="345" rx="14" ry="10" fill="#1A1726"/>
+    </g>
+  </g>
+</svg>
