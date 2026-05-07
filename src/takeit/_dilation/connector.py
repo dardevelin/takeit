@@ -34,8 +34,8 @@ from .._status import DilationHint
 from ._noise import NoiseConnection
 
 
-PROLOGUE_LEADER = b"Magic-Wormhole Dilation Handshake v1 Leader\n\n"
-PROLOGUE_FOLLOWER = b"Magic-Wormhole Dilation Handshake v1 Follower\n\n"
+PROLOGUE_LEADER = b"takeit Dilation Handshake v1 Leader\n\n"
+PROLOGUE_FOLLOWER = b"takeit Dilation Handshake v1 Follower\n\n"
 NOISEPROTO = b"Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s"
 
 
@@ -103,6 +103,11 @@ class Connector:
     # Per-STUN-server timeout. Two-second cap is short because we run all
     # STUN servers in parallel and only need one to succeed.
     STUN_TIMEOUT = 2.0
+
+    # Cap peer-supplied outbound connection attempts per hint batch. The
+    # peer is already authenticated at this layer, but it should not be able
+    # to turn one mailbox message into unbounded local connect attempts.
+    MAX_DIRECT_HINTS = 32
 
     def __attrs_post_init__(self):
         # takeit has no transit-relay fallback; STUN-derived reflexive
@@ -320,7 +325,7 @@ class Connector:
         This works for users with port-forwards and NATs where TCP/UDP
         external IPs match. Symmetric / port-restricted NATs without a
         port-forward will not connect through this path; that's the same
-        limitation upstream wormhole pushes into the transit relay, which
+        limitation the upstream project pushes into the transit relay, which
         takeit deliberately doesn't have.
         """
         from ._stun import discover_reflexive_address
@@ -350,6 +355,8 @@ class Connector:
 
     def _schedule_connection(self, delay, h):
         ep = endpoint_from_hint_obj(h, self._tor, self._reactor)
+        if ep is None:
+            return False
         desc = describe_hint_obj(h, False, self._tor)
         d = deferLater(self._reactor, delay, self._connect, ep, desc)
 
@@ -370,6 +377,7 @@ class Connector:
         d.addErrback(lambda f: f.trap(DNSLookupError))
         d.addErrback(log.err)
         self._pending_connectors.add(d)
+        return True
 
     def _use_hints(self, hints):
         # takeit only supports direct hints (no transit relay).
@@ -381,13 +389,18 @@ class Connector:
             if isinstance(h, (DirectTCPV1Hint, TorTCPV1Hint)):
                 direct[h.priority].append(h)
         delay = 0.0
+        scheduled = 0
         priorities = sorted(set(direct.keys()), reverse=True)
         for p in priorities:
             for h in direct[p]:
                 if isinstance(h, TorTCPV1Hint) and not self._tor:
                     continue
+                if scheduled >= self.MAX_DIRECT_HINTS:
+                    continue
+                if not self._schedule_connection(delay, h):
+                    continue
+                scheduled += 1
                 hint_status.append(DilationHint(f"{h.hostname}:{h.port}", True))
-                self._schedule_connection(delay, h)
                 # Make all direct connections immediately. Later, we'll change
                 # the add_candidate() function to look at the priority when
                 # deciding whether to accept a successful connection or not,

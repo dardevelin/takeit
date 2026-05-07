@@ -18,6 +18,7 @@ from zope.interface import implementer
 from takeit import _interfaces
 from takeit._rendezvous_nostr import (
     DEFAULT_POW_DIFFICULTY,
+    MAX_INBOUND_EVENT_CONTENT_B64_BYTES,
     TAKEIT_KIND,
     NostrRendezvous,
 )
@@ -72,6 +73,12 @@ def _wired(side="sssssssss", relays=("wss://example.invalid",)):
     rv = NostrRendezvous(side=side, relays=relays, pow_difficulty=0)
     rv.wire(boss, mailbox, term)
     return rv, boss, mailbox, term
+
+
+def _set_active_subscription(rv, tag="tagX", sub_id="sub-0"):
+    rv._tag = tag
+    rv._subscription_id = sub_id
+    return sub_id
 
 
 # --- construction-time validation ---
@@ -233,16 +240,26 @@ async def test_stop_shuts_down_client_and_emits_lost(mock_client):
 # --- inbound delivery from a Nostr event ---
 
 
-def _build_event(side, phase, body, our_signer_keys=None):
+def _build_event(
+    side,
+    phase,
+    body,
+    our_signer_keys=None,
+    *,
+    t_tag="tagX",
+    kind=TAKEIT_KIND,
+    raw_content=None,
+):
     """Build a real Nostr Event object for inbound-delivery tests."""
     from nostr_sdk import EventBuilder, Keys, Kind, Tag
 
     keys = our_signer_keys or Keys.generate()
-    builder = EventBuilder(
-        Kind(TAKEIT_KIND), base64.b64encode(body).decode("ascii")
-    ).tags(
+    content = raw_content
+    if content is None:
+        content = base64.b64encode(body).decode("ascii")
+    builder = EventBuilder(Kind(kind), content).tags(
         [
-            Tag.parse(["t", "tagX"]),
+            Tag.parse(["t", t_tag]),
             Tag.parse(["s", side]),
             Tag.parse(["p", phase]),
         ]
@@ -252,14 +269,16 @@ def _build_event(side, phase, body, our_signer_keys=None):
 
 def test_deliver_inbound_passes_through_to_mailbox():
     rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
     event = _build_event("their-side", "pake", b"some-body")
-    rv._deliver_inbound(event)
+    rv._deliver_inbound(event, sub_id)
     assert ("rx_message", "their-side", "pake", b"some-body") in mailbox.events
 
 
 def test_deliver_inbound_accepts_known_phases():
-    """All wormhole control-channel phase strings are accepted."""
+    """All takeit control-channel phase strings are accepted."""
     rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
     for phase in (
         "pake",
         "version",
@@ -271,7 +290,7 @@ def test_deliver_inbound_accepts_known_phases():
         "dilate-9999",
     ):
         event = _build_event("their-side", phase, b"x")
-        rv._deliver_inbound(event)
+        rv._deliver_inbound(event, sub_id)
     assert sum(1 for e in mailbox.events if e[0] == "rx_message") == 8
 
 
@@ -279,6 +298,7 @@ def test_deliver_inbound_drops_invalid_phases():
     """Malformed phase strings are dropped before reaching Mailbox; this
     is the defense-in-depth layer for the Mailbox redrain DoS."""
     rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
     # All invalid: not in {pake, version}, not numeric, not dilate-N.
     for bad_phase in (
         "../etc/passwd",
@@ -295,7 +315,7 @@ def test_deliver_inbound_drops_invalid_phases():
         "X" * 100,
     ):
         event = _build_event("their-side", bad_phase, b"x")
-        rv._deliver_inbound(event)
+        rv._deliver_inbound(event, sub_id)
     # No rx_message events delivered for any of those invalid phases.
     assert not any(e[0] == "rx_message" for e in mailbox.events)
 
@@ -331,8 +351,61 @@ def test_deliver_inbound_drops_event_missing_tags():
     rv, _, mailbox, _ = _wired()
     # No s/p tags
     event = EventBuilder(Kind(TAKEIT_KIND), "ZGF0YQ==").sign_with_keys(Keys.generate())
-    rv._deliver_inbound(event)
+    sub_id = _set_active_subscription(rv)
+    rv._deliver_inbound(event, sub_id)
     assert mailbox.events == []  # nothing delivered
+
+
+def test_deliver_inbound_drops_wrong_kind():
+    rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
+    event = _build_event("their-side", "pake", b"some-body", kind=1)
+    rv._deliver_inbound(event, sub_id)
+    assert mailbox.events == []
+
+
+def test_deliver_inbound_drops_wrong_t_tag():
+    rv, _, mailbox, _ = _wired()
+    _set_active_subscription(rv, tag="expected-tag")
+    event = _build_event("their-side", "pake", b"some-body", t_tag="other-tag")
+    rv._deliver_inbound(event, "sub-0")
+    assert mailbox.events == []
+
+
+def test_deliver_inbound_drops_wrong_subscription_id():
+    rv, _, mailbox, _ = _wired()
+    _set_active_subscription(rv, sub_id="sub-good")
+    event = _build_event("their-side", "pake", b"some-body")
+    rv._deliver_inbound(event, "sub-bad")
+    assert mailbox.events == []
+
+
+def test_deliver_inbound_drops_invalid_base64_content():
+    rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
+    event = _build_event(
+        "their-side",
+        "pake",
+        b"",
+        raw_content="not base64!!!",
+    )
+    rv._deliver_inbound(event, sub_id)
+    assert mailbox.events == []
+
+
+def test_deliver_inbound_drops_oversized_content():
+    rv, _, mailbox, _ = _wired()
+    sub_id = _set_active_subscription(rv)
+    # Keep the event valid base64 but past the inbound encoded cap.
+    raw_content = "A" * (MAX_INBOUND_EVENT_CONTENT_B64_BYTES + 4)
+    event = _build_event(
+        "their-side",
+        "pake",
+        b"",
+        raw_content=raw_content,
+    )
+    rv._deliver_inbound(event, sub_id)
+    assert mailbox.events == []
 
 
 # --- integration test (skipped without a real relay) ---

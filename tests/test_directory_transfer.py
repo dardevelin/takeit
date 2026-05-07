@@ -2,11 +2,11 @@
 End-to-end-ish tests for directory transfer (HYP-388).
 
 Exercises the same code paths cli.py drives, without spinning up a
-full wormhole + dilation stack:
+full takeit + dilation stack:
 - sender: walk_directory + materialize_and_hash + build_offer_directory
 - receiver: parse_offer + extract_zip_safely + atomic-rename
 
-The wormhole/dilation layer is unit-tested elsewhere (test_api,
+The takeit/dilation layer is unit-tested elsewhere (test_api,
 test_boss, etc.); this file pins the directory-specific glue.
 """
 
@@ -42,7 +42,7 @@ def _trees_equal(a, b):
     return True
 
 
-# --- end-to-end (in-process; no wormhole layer) ---
+# --- end-to-end (in-process; no takeit layer) ---
 
 
 def test_e2e_directory_transfer_round_trips(tmp_path):

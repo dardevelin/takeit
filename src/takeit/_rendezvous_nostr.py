@@ -7,13 +7,13 @@ Wire format (kind 21420, ephemeral range 20000-29999):
     tags = [
         ["t", <derived_tag>],   # NIP-01 single-letter tag for filter routing
         ["s", <our_side>],      # the takeit side string (hex)
-        ["p", <phase>],         # the wormhole phase ("pake" / "version" / "0" / ...)
+        ["p", <phase>],         # the takeit phase ("pake" / "version" / "0" / ...)
     ]
     content = base64.b64encode(body).decode("ascii")
 
 The Nostr event signature provides authenticity for the *publisher* (a fresh
 ephemeral keypair per session — no long-term identity), but real authentication
-of the wormhole peer is provided by SPAKE2 over the body. The relay operator
+of the takeit peer is provided by SPAKE2 over the body. The relay operator
 sees only encrypted phase payloads keyed on the blinded tag.
 
 Concurrency model:
@@ -38,7 +38,7 @@ from zope.interface import implementer
 
 from . import _interfaces
 
-# Whitelist of valid phase strings on the wormhole control channel. The
+# Whitelist of valid phase strings on the takeit control channel. The
 # rendezvous drops events with anything else BEFORE they reach Mailbox —
 # defense-in-depth against a malicious peer flooding distinct phase
 # values to amplify the Mailbox redrain.
@@ -46,7 +46,7 @@ _PHASE_RE = re.compile(r"^(pake|version|\d{1,10}|dilate-\d{1,10})$")
 
 
 def _is_valid_phase(phase):
-    """True iff `phase` is one of the wormhole's known control phases."""
+    """True iff `phase` is one of the takeit's known control phases."""
     return isinstance(phase, str) and bool(_PHASE_RE.fullmatch(phase))
 
 
@@ -56,6 +56,12 @@ TAKEIT_KIND = 21420
 # NIP-13 proof-of-work difficulty. 16 is cheap (~ms to mine on a laptop)
 # and deters incidental spam without burdening real users.
 DEFAULT_POW_DIFFICULTY = 16
+
+# Bound relay-carried event bodies before decoding. Control-plane messages
+# are tiny (phase keys and SPAKE2 ciphertext); this is strict enough to keep
+# a malicious peer/relay from forcing large temporary allocations on inbound.
+MAX_INBOUND_EVENT_CONTENT_BYTES = 64 * 1024
+MAX_INBOUND_EVENT_CONTENT_B64_BYTES = ((MAX_INBOUND_EVENT_CONTENT_BYTES + 2) // 3) * 4
 
 
 @implementer(_interfaces.IRendezvousConnector)
@@ -142,7 +148,7 @@ class NostrRendezvous:
         from nostr_sdk import Client, Keys, NostrSigner
 
         # Fresh ephemeral keypair per session — no on-disk persistence,
-        # no long-term identity. Authenticity of the wormhole peer comes
+        # no long-term identity. Authenticity of the takeit peer comes
         # from SPAKE2 over the body, not the Nostr signature.
         signer_keys = Keys.generate()
         signer = NostrSigner.keys(signer_keys)
@@ -215,7 +221,7 @@ class NostrRendezvous:
 
     # ---- inbound from Nostr (called from _Handler) ----
 
-    def _deliver_inbound(self, event):
+    def _deliver_inbound(self, event, subscription_id):
         """Route a received Nostr event to Mailbox.rx_message.
 
         Drops events with malformed/unknown phase strings before they
@@ -223,14 +229,37 @@ class NostrRendezvous:
         events with arbitrarily-many distinct ``p`` tag values to
         amplify the Mailbox redrain.
         """
+        if subscription_id != self._subscription_id:
+            log.err(
+                ValueError(
+                    "takeit: ignoring inbound Nostr event with unexpected "
+                    f"subscription_id: {subscription_id!r}"
+                )
+            )
+            return
+        if event.kind().as_u16() != TAKEIT_KIND:
+            log.err(
+                ValueError(
+                    f"takeit: ignoring inbound Nostr event with wrong kind: "
+                    f"{event.kind().as_u16()}"
+                )
+            )
+            return
+
+        t_tag = None
         side = None
         phase = None
         for tag in event.tags().to_vec():
             vec = tag.as_vec()
-            if len(vec) >= 2 and vec[0] == "s":
+            if len(vec) >= 2 and vec[0] == "t":
+                t_tag = vec[1]
+            elif len(vec) >= 2 and vec[0] == "s":
                 side = vec[1]
             elif len(vec) >= 2 and vec[0] == "p":
                 phase = vec[1]
+        if self._tag is None or t_tag != self._tag:
+            log.msg("takeit: ignoring inbound Nostr event with missing/incorrect t tag")
+            return
         if side is None or phase is None:
             log.err(
                 ValueError("takeit: received Nostr event missing s/p tags; ignoring")
@@ -239,10 +268,32 @@ class NostrRendezvous:
         if not _is_valid_phase(phase):
             log.msg(f"takeit: dropping inbound event with invalid phase: {phase!r}")
             return
+        content = event.content()
+        if not isinstance(content, (bytes, str)):
+            log.err(
+                ValueError(f"takeit: inbound content has invalid type: {type(content)}")
+            )
+            return
+        if len(content) > MAX_INBOUND_EVENT_CONTENT_B64_BYTES:
+            log.err(
+                ValueError(
+                    f"takeit: dropping inbound event with oversized encoded content: "
+                    f"{len(content)} bytes"
+                )
+            )
+            return
         try:
-            body = base64.b64decode(event.content())
+            body = base64.b64decode(content, validate=True)
         except Exception as e:
             log.err(e)
+            return
+        if len(body) > MAX_INBOUND_EVENT_CONTENT_BYTES:
+            log.err(
+                ValueError(
+                    f"takeit: dropping inbound event with oversized decoded "
+                    f"content: {len(body)} bytes"
+                )
+            )
             return
         self._M.rx_message(side, phase, body)
 
@@ -269,7 +320,7 @@ class _Handler:
 
     async def handle(self, relay_url, subscription_id, event):
         try:
-            self._rv._deliver_inbound(event)
+            self._rv._deliver_inbound(event, subscription_id)
         except Exception as e:  # pragma: no cover
             log.err(e)
 

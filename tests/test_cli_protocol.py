@@ -276,6 +276,40 @@ def test_parse_offer_rejects_path_traversal():
             parse_offer(msg)
 
 
+def test_parse_offer_rejects_invalid_transfer_id_base64():
+    msg = json.dumps(
+        {
+            "offer": {
+                "kind": "file",
+                "transfer_id": "not@@@base64!",
+                "filename": "a.txt",
+                "size": 1,
+                "content_hash": base64.b64encode(b"\x00" * 32).decode(),
+                "chunk_size": 1024,
+            }
+        }
+    ).encode()
+    with pytest.raises(ProtocolError, match="bad base64 in transfer_id"):
+        parse_offer(msg)
+
+
+def test_parse_offer_rejects_invalid_content_hash_base64():
+    msg = json.dumps(
+        {
+            "offer": {
+                "kind": "file",
+                "transfer_id": base64.b64encode(b"\x00" * 16).decode(),
+                "filename": "a.txt",
+                "size": 1,
+                "content_hash": "bad+base64!!",
+                "chunk_size": 1024,
+            }
+        }
+    ).encode()
+    with pytest.raises(ProtocolError, match="bad base64 in content_hash"):
+        parse_offer(msg)
+
+
 # Pre-HYP-392 tests covered chunk_hashes count/length validation in
 # parse_offer; those guards moved to parse_subchannel_header (see
 # tests/test_subchannel_header.py).
@@ -735,7 +769,7 @@ def test_build_offer_text_rejects_non_string():
 
 
 def test_build_offer_text_rejects_oversized():
-    """Text offers ride inside the wormhole control message — cap at
+    """Text offers ride inside the takeit control message — cap at
     MAX_TEXT_BYTES UTF-8 bytes to stay well under the layer's payload
     limit and bound memory."""
     too_big = "x" * (MAX_TEXT_BYTES + 1)

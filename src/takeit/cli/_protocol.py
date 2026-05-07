@@ -1,7 +1,7 @@
 """
 takeit file-transfer protocol — pure logic, no I/O.
 
-Wire format (control over the wormhole's app-message channel; bulk over a
+Wire format (control over the takeit's app-message channel; bulk over a
 dilation subchannel):
 
 Rendezvous-visible control messages (JSON, one per app-message):
@@ -71,7 +71,7 @@ MAX_CHUNK_COUNT = 1 << 20  # ~1M chunks (with 1 MiB chunks → 1 TiB)
 # UTF-8 bytes ≤ 255 to be portable.
 MAX_FILENAME_BYTES = 255
 
-# Cap on inline text-mode payload. Text rides inside the wormhole control
+# Cap on inline text-mode payload. Text rides inside the takeit control
 # message (one app-message), not the bulk subchannel. 64 KiB is well under
 # every reasonable framing limit and keeps memory bounded against a peer
 # that crafts a hostile offer.
@@ -341,8 +341,10 @@ def parse_offer(payload):
     # Every kind carries transfer_id; decode once here.
     if "transfer_id" not in o:
         raise ProtocolError("offer missing 'transfer_id'")
+    if not isinstance(o["transfer_id"], str):
+        raise ProtocolError("transfer_id must be a base64 string")
     try:
-        o["_transfer_id_bytes"] = base64.b64decode(o["transfer_id"])
+        o["_transfer_id_bytes"] = base64.b64decode(o["transfer_id"], validate=True)
     except Exception as e:
         raise ProtocolError(f"bad base64 in transfer_id: {e}")
     if len(o["_transfer_id_bytes"]) != TRANSFER_ID_BYTES:
@@ -399,8 +401,10 @@ def _parse_chunked_offer(o, name_field):
         raise ProtocolError(f"offer size {o['size']} exceeds max {MAX_OFFER_SIZE}")
     if not isinstance(o["chunk_size"], int) or o["chunk_size"] <= 0:
         raise ProtocolError("chunk_size must be a positive int")
+    if not isinstance(o["content_hash"], str):
+        raise ProtocolError("content_hash must be a base64 string")
     try:
-        o["_content_hash_bytes"] = base64.b64decode(o["content_hash"])
+        o["_content_hash_bytes"] = base64.b64decode(o["content_hash"], validate=True)
     except Exception as e:
         raise ProtocolError(f"bad base64 in content_hash: {e}")
     if len(o["_content_hash_bytes"]) != 32:
@@ -457,7 +461,7 @@ def _decode(payload):
 
 
 def encode_message(msg):
-    """Serialize a control message to bytes, ready for wormhole send."""
+    """Serialize a control message to bytes, ready for takeit send."""
     return json.dumps(msg, separators=(",", ":")).encode("utf-8")
 
 

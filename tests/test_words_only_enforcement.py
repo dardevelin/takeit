@@ -12,17 +12,15 @@ forces an out-of-band SAS comparison before any payload moves).
 The audit's wording: words-only without mandatory verifier comparison
 "cannot honestly claim relay-level anonymity or active-relay MITM
 resistance." This module tests the helper that enforces the rule and
-asserts the four code-resolution sites in cli.py thread the ``verify``
-flag through to it.
+asserts the code-resolution sites in cli.py validate before constructing
+or committing a takeit session.
 
 We deliberately do NOT drive the full ``cmd_send`` / ``cmd_receive``
 flow via ``CliRunner`` for these checks: those commands call
 ``twisted.internet.task.react`` which boots a real reactor and
-``takeit.create`` which opens Nostr relay sockets. The validation
-itself lives inside the inlineCallbacks _after_ ``w.get_code()``, so a
-CliRunner test would hang on real network I/O before reaching the
-helper. Source-introspection of the four callsites is a tighter,
-faster proof that the wiring is correct.
+``takeit.create`` which opens Nostr relay sockets. Source-introspection
+and direct helper-level checks are tighter, faster proof that the wiring
+is correct.
 """
 
 import inspect
@@ -127,25 +125,9 @@ def test_no_callsite_uses_old_helper_name():
     )
 
 
-def test_all_callsites_thread_verify_through():
-    """Every call to ``_validate_words_only_handoff`` must pass
-    ``verify`` as the second arg — calling the helper without the flag
-    would default to the old warn-only behavior we're trying to
-    eliminate.
-
-    Post-HYP-421 the validation moved to fire BEFORE the wormhole
-    state machine commits the code (before `w.set_code` /
-    `w.allocate_code` / `helper.choose_words`). This means:
-
-    - Sender explicit-code path (text + file/dir): two calls passing
-      ``(explicit_code, verify)``.
-    - Receiver positional-code path: one call passing ``(code, verify)``.
-    - Receiver interactive path: one call wrapped in a lambda passed
-      as ``validate=`` to ``input_with_completion``, so the helper
-      fires it inside the readline thread BEFORE choose_words.
-
-    Allocate-paths are exempt because allocate_code always produces a
-    canonical <locator>:<words> code (HYP-406)."""
+def test_words_only_helper_is_only_called_from_pre_takeit_validator():
+    """The words-only gate is centralized with format validation so all
+    user-provided codes pass through the same pre-takeit helper."""
     src = inspect.getsource(cli_mod)
     calls = [
         line.strip()
@@ -153,14 +135,33 @@ def test_all_callsites_thread_verify_through():
         if "_validate_words_only_handoff(" in line
         and "def _validate_words_only_handoff" not in line
     ]
-    # 4 total call lines: 2 sender (with explicit_code), 1 receiver
-    # positional (with code), 1 receiver interactive (lambda wrapper).
-    assert len(calls) == 4, f"expected 4 call sites, found {len(calls)}: {calls!r}"
-    # Every call must pass ``verify`` (not omit it / default it).
-    for line in calls:
-        assert ", verify)" in line or ", verify=" in line, (
-            f"callsite must pass verify; got: {line!r}"
-        )
+    assert calls == ["_validate_words_only_handoff(code, verify)"]
+    helper_src = inspect.getsource(cli_mod._validate_code_before_takeit)
+    assert "validate_code(code)" in helper_src
+    assert "parse_code(code)" in helper_src
+    assert "_validate_words_only_handoff(code, verify)" in helper_src
+
+
+def test_receive_validates_before_takeit_create():
+    """Positional and prompted receive codes must be resolved before
+    ``takeit.create`` so a refused words-only code cannot even start the
+    relay connector."""
+    src = inspect.getsource(cli_mod._run_receive)
+    assert src.index("_validate_code_before_takeit(code, verify)") < src.index(
+        "takeit.create("
+    )
+    assert src.index("prompt_code_with_completion(") < src.index("takeit.create(")
+
+
+def test_send_validates_explicit_code_before_takeit_create():
+    text_src = inspect.getsource(cli_mod._run_send_text)
+    send_src = inspect.getsource(cli_mod._do_send)
+    assert text_src.index("_validate_code_before_takeit") < text_src.index(
+        "takeit.create("
+    )
+    assert send_src.index("_validate_code_before_takeit") < send_src.index(
+        "takeit.create("
+    )
 
 
 def test_helper_signature_takes_code_and_verify():
@@ -187,7 +188,7 @@ def test_validation_fires_before_state_machine_via_fake_rendezvous():
     in cli.py runs BEFORE w.set_code so FakeRendezvous never sees a
     tx_open. (The cli helpers themselves are tested at the layer above
     — here we just verify that, given the helper raises, the flow that
-    USES the helper hasn't already touched the wormhole.)
+    USES the helper hasn't already touched the takeit session.)
 
     This is a structural test: we drive the helper directly + assert
     nothing else happened. The cli orchestrators each have their own
@@ -208,7 +209,7 @@ def test_validation_fires_before_state_machine_via_fake_rendezvous():
         rv_a.wire(boss, mailbox, terminator)
         return rv_a
 
-    # Constructing the wormhole wires the rendezvous + boots state
+    # Constructing the takeit session wires the rendezvous + boots state
     # machines but doesn't publish anything (no set_code yet). We
     # discard the handle — we only care about the FakeRendezvous's
     # observed traffic.
@@ -222,7 +223,7 @@ def test_validation_fires_before_state_machine_via_fake_rendezvous():
 
     # Per HYP-421, the cli ORCHESTRATOR validates before calling
     # set_code. We mimic that here: run validation FIRST, expect it
-    # to raise, and assert the wormhole hasn't been touched.
+    # to raise, and assert the takeit session hasn't been touched.
     code = "purple-sausages-mocha"  # words-only
     verify = False
     try:
@@ -233,11 +234,11 @@ def test_validation_fires_before_state_machine_via_fake_rendezvous():
         raise AssertionError("expected UsageError")
 
     # FakeRendezvous must NOT have seen any outbound traffic — proof
-    # that the abort happened BEFORE the wormhole's state-machine
+    # that the abort happened BEFORE the takeit state-machine
     # commit-the-code path.
     assert rv_a.opened == [], f"unexpected rendezvous tx_open: {rv_a.opened!r}"
     assert rv_a.added == [], f"unexpected rendezvous tx_add: {rv_a.added!r}"
-    # The wormhole was created (FakeRendezvous wire happened) but we
+    # The takeit session was created (FakeRendezvous wire happened) but we
     # never set_code'd, so no tag was derived.
     assert rv_a._tag is None, f"unexpected tag: {rv_a._tag!r}"
 
@@ -277,7 +278,7 @@ def test_set_code_without_validation_would_have_published():
     eq.flush_sync()
     assert rv_a.opened, (
         "control test failed: set_code didn't trigger tx_open in "
-        "the fake. Either FakeRendezvous changed shape or the wormhole "
+        "the fake. Either FakeRendezvous changed shape or the takeit session "
         "doesn't publish on set_code anymore — the regression test "
         "above is no longer load-bearing."
     )

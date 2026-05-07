@@ -311,14 +311,14 @@ class SubChannel:
         self.local_close()
 
     def getHost(self):
-        # we define "host addr" as the overall wormhole
+        # we define "host addr" as the overall takeit
         return self._host_addr
 
     def getPeer(self):
-        # and "peer addr" as the subchannel within that wormhole
+        # and "peer addr" as the subchannel within that takeit
         return self._peer_addr
 
-    # IProducer: throttle inbound data (wormhole "up" to local app's Protocol)
+    # IProducer: throttle inbound data (takeit "up" to local app's Protocol)
     def stopProducing(self):
         self._manager.subchannel_stopProducing(self)
 
@@ -328,7 +328,7 @@ class SubChannel:
     def resumeProducing(self):
         self._manager.subchannel_resumeProducing(self)
 
-    # IConsumer: allow the wormhole to throttle outbound data (app->wormhole)
+    # IConsumer: allow the takeit to throttle outbound data (app->takeit)
     def registerProducer(self, producer, streaming):
         self._manager.subchannel_registerProducer(self, producer, streaming)
 

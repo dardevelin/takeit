@@ -34,7 +34,7 @@ from .._status import (
 )
 
 
-# exported to Wormhole() for inclusion in versions message
+# exported to Takeit() for inclusion in versions message
 # note that these are strings, not numbers, to facilitate
 # experimentation or non-standard versions; the _order_ of versions in
 # "can-dilate" is important!
@@ -65,7 +65,7 @@ class UnknownMessageType(Exception):
 @define
 class DilatedWormhole:
     """
-    Represents actions available once a wormhole has been successfully dilated.
+    Represents actions available once a takeit has been successfully dilated.
 
     New subchannels to the other peer may be established by first
     obtaining an `IStreamClientEndpoint` from the
@@ -106,7 +106,7 @@ class DilatedWormhole:
         Once ``.connect()`` is called on the returned endpoint, a new
         subchannel is opened from this peer to the other peer. The
         other peer sees an OPEN and instantiates a listener from the
-        Factory it was given during creation of the wormhole.
+        Factory it was given during creation of the takeit.
         """
         return SubchannelConnectorEndpoint(
             subprotocol_name,
@@ -333,7 +333,7 @@ class Manager:
         # TODO: let inbound/outbound create the endpoints, then return them
         # to us
         self._main_channel = OneShotObserver(self._eventual_queue)
-        self._subprotocol_factories = SubchannelDemultiplex()
+        self._subprotocol_factories = SubchannelDemultiplex(self._expected_subprotocols)
 
         # NOTE: circular refs, not ideal
         self._api = DilatedWormhole(self)
@@ -406,11 +406,11 @@ class Manager:
         self.start()
 
     # from _boss.Boss
-    def _wormhole_status(self, wormhole_status):
+    def _takeit_status(self, takeit_status):
         self._maybe_send_status(
             evolve(
                 self._latest_status,
-                mailbox=wormhole_status,
+                mailbox=takeit_status,
             )
         )
 
@@ -979,7 +979,7 @@ class Manager:
 class Dilator:
     """I launch the dilation process.
 
-    I am created with every Wormhole (regardless of whether .dilate()
+    I am created with every Takeit (regardless of whether .dilate()
     was called or not), and I handle the initial phase of dilation,
     before we know whether we'll be the Leader or the Follower. Once we
     hear the other side's VERSION message (which tells us that we have a
@@ -1011,7 +1011,7 @@ class Dilator:
         self,
         transit_relay_location=None,
         no_listen=False,
-        wormhole_status=None,
+        takeit_status=None,
         status_update=None,
         ping_interval=None,
         expected_subprotocols=None,
@@ -1039,7 +1039,7 @@ class Dilator:
                 expected_subprotocols,
                 no_listen,
                 status_update,
-                initial_mailbox_status=wormhole_status,
+                initial_mailbox_status=takeit_status,
             )
             self._manager = m
             if self._pending_dilation_key is not None:

@@ -69,7 +69,7 @@ class Disconnect(Exception):
 #    * a non-relay will probably send junk
 #    * wait for "ok\n", hang up if we get anything different
 # (all subsequent steps are for both inbound and outbound connections)
-# 2: send PROLOGUE_LEADER/FOLLOWER: "Magic-Wormhole Dilation Handshake v1 (l/f)\n\n"
+# 2: send PROLOGUE_LEADER/FOLLOWER: "takeit Dilation Handshake v1 (l/f)\n\n"
 # 3: wait for the opposite PROLOGUE string, else hang up
 # (everything past this point is a Frame, with be4 length prefix. Frames are
 #  either noise handshake or an encrypted message)
@@ -207,7 +207,7 @@ class _Framer:
         self._transport.write(to_be4(len(frame)) + frame)
 
 
-# Prologue: double-newline-terminated this-is-really-wormhole response
+# Prologue: double-newline-terminated this-is-really-takeit response
 #           from peer. First data received from peer.
 # Frame: Either handshake or encrypted message. Length-prefixed on wire.
 # Handshake: the Noise ephemeral key, first framed message
@@ -239,36 +239,66 @@ T_DATA = b"\x04"
 T_CLOSE = b"\x05"
 T_ACK = b"\x06"
 
+MAX_SUBPROTOCOL_NAME_BYTES = 1024
+
+
+def _require_record_length(plaintext, *, exact=None, minimum=None):
+    if exact is not None and len(plaintext) != exact:
+        raise ValueError(
+            f"record type {plaintext[0:1]!r} must be {exact} bytes, "
+            f"got {len(plaintext)}"
+        )
+    if minimum is not None and len(plaintext) < minimum:
+        raise ValueError(
+            f"record type {plaintext[0:1]!r} must be at least {minimum} bytes, "
+            f"got {len(plaintext)}"
+        )
+
 
 def parse_record(plaintext):
+    if not plaintext:
+        raise ValueError("empty record")
     msgtype = plaintext[0:1]
     if msgtype == T_KCM:
+        _require_record_length(plaintext, exact=1)
         return KCM()
     if msgtype == T_PING:
+        _require_record_length(plaintext, exact=5)
         ping_id = plaintext[1:5]
         return Ping(ping_id)
     if msgtype == T_PONG:
+        _require_record_length(plaintext, exact=5)
         ping_id = plaintext[1:5]
         return Pong(ping_id)
     if msgtype == T_OPEN:
+        _require_record_length(plaintext, minimum=9)
         scid = from_be4(plaintext[1:5])
         seqnum = from_be4(plaintext[5:9])
-        subprotocol = str(plaintext[9:], "utf8")
+        subprotocol_bytes = plaintext[9:]
+        if len(subprotocol_bytes) > MAX_SUBPROTOCOL_NAME_BYTES:
+            raise ValueError("subprotocol name too long")
+        try:
+            subprotocol = subprotocol_bytes.decode("utf8")
+        except UnicodeDecodeError as e:
+            raise ValueError("subprotocol name is not valid UTF-8") from e
         return Open(seqnum, scid, subprotocol)
     if msgtype == T_DATA:
+        _require_record_length(plaintext, minimum=9)
         scid = from_be4(plaintext[1:5])
         seqnum = from_be4(plaintext[5:9])
         data = plaintext[9:]
         return Data(seqnum, scid, data)
     if msgtype == T_CLOSE:
+        _require_record_length(plaintext, exact=9)
         scid = from_be4(plaintext[1:5])
         seqnum = from_be4(plaintext[5:9])
         return Close(seqnum, scid)
     if msgtype == T_ACK:
+        _require_record_length(plaintext, exact=5)
         resp_seqnum = from_be4(plaintext[1:5])
         return Ack(resp_seqnum)
-    log.err(f"received unknown message type: {plaintext}")
-    raise ValueError()
+    log.err(f"received unknown message type: {msgtype!r}")
+    raise ValueError(f"unknown message type: {msgtype!r}")
 
 
 def encode_record(r):

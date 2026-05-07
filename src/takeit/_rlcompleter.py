@@ -5,7 +5,7 @@ This runs in a worker thread (so the reactor isn't blocked while the user
 types). Every call into the IInputHelper goes through
 `blockingCallFromThread` to hop back to the reactor thread.
 
-Compared to upstream wormhole's _rlcompleter:
+Compared to the upstream project this was forked from:
 - The two-phase nameplate-then-words completion is gone. Every press of TAB
   completes against the local wordlist for whatever word the user is on.
 - No `choose_nameplate`, no `when_wordlist_is_available`, no `refresh_*`.
@@ -18,6 +18,8 @@ from attr import attrib, attrs
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet.threads import blockingCallFromThread, deferToThread
 
+from ._code import validate_code
+from ._wordlist import PGPWordList
 from .errors import KeyFormatError
 
 try:
@@ -82,6 +84,24 @@ class CodeInputter:
         self._bcft(self._input_helper.choose_words, code)
 
 
+class _StandaloneInputHelper:
+    """Readline helper for prompting before a takeit session exists."""
+
+    def __init__(self, expected_code_length=3):
+        self._wordlist = PGPWordList()
+        self._expected_code_length = expected_code_length
+        self.code = None
+
+    def get_word_completions(self, prefix):
+        return self._wordlist.get_completions(
+            prefix, num_words=self._expected_code_length
+        )
+
+    def choose_words(self, code):
+        validate_code(code)
+        self.code = code
+
+
 def _input_code_with_completion(prompt, input_helper, reactor, validate=None):
     # reminder: this all occurs in a separate thread. All calls to input_helper
     # must go through blockingCallFromThread()
@@ -101,7 +121,7 @@ def _input_code_with_completion(prompt, input_helper, reactor, validate=None):
         code = code.decode("utf-8")
     # Run caller-supplied validation BEFORE c.finish (HYP-421). c.finish
     # synchronously fires input_helper.choose_words → Code.finished_input
-    # → Boss/Key got_code, which kicks the wormhole into the rendezvous-
+    # → Boss/Key got_code, which kicks takeit into the rendezvous-
     # and-PAKE path. If we validate after c.finish, we've already
     # published our presence on a potentially unsafe (words-only) tag.
     if validate is not None:
@@ -125,14 +145,24 @@ def input_with_completion(prompt, input_helper, reactor, validate=None):
     """Drive the readline-prompted code entry on a worker thread.
 
     `validate(code)` if given is called AFTER the user presses Enter
-    but BEFORE the typed code is committed to the wormhole state
+    but BEFORE the typed code is committed to the takeit state
     machine. Raise from `validate` to abort cleanly without entering
     the rendezvous path. Used by takeit.cli for HYP-421's words-only
     refusal that must fire pre-commit.
     """
     t = reactor.addSystemEventTrigger("before", "shutdown", warn_readline)
-    used_completion = yield deferToThread(
-        _input_code_with_completion, prompt, input_helper, reactor, validate
-    )
-    reactor.removeSystemEventTrigger(t)
+    try:
+        used_completion = yield deferToThread(
+            _input_code_with_completion, prompt, input_helper, reactor, validate
+        )
+    finally:
+        reactor.removeSystemEventTrigger(t)
     return used_completion
+
+
+@inlineCallbacks
+def prompt_code_with_completion(prompt, reactor, validate=None, expected_code_length=3):
+    """Prompt for a code with local word completion before takeit creation."""
+    helper = _StandaloneInputHelper(expected_code_length)
+    yield input_with_completion(prompt, helper, reactor, validate=validate)
+    return helper.code

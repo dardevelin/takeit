@@ -10,6 +10,7 @@ be discarded. These tests pin the invariant.
 import hashlib
 import io
 import os
+import stat
 import struct
 import zipfile
 
@@ -82,16 +83,27 @@ def test_walk_directory_refuses_symlink_pointing_outside_root(tmp_path):
         walk_directory(str(src))
 
 
-def test_walk_directory_follows_symlink_pointing_inside_root(tmp_path):
-    """A symlink whose target resolves WITHIN the source root is safe
-    to include — the user clearly intends it as part of the tree."""
+def test_walk_directory_refuses_symlink_pointing_inside_root(tmp_path):
+    """Even in-root symlinks are refused: validation and file opening
+    happen at different times, so following a symlink would be a TOCTOU
+    race."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "a.txt").write_bytes(b"target")
     (src / "alias").symlink_to(src / "a.txt")
-    paths, num_files, num_bytes = walk_directory(str(src))
-    rels = sorted(os.path.relpath(p, str(src)) for p in paths)
-    assert rels == ["a.txt", "alias"]
+    with pytest.raises(ValueError, match="symlink"):
+        walk_directory(str(src))
+
+
+def test_walk_directory_refuses_symlink_directory(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "a.txt").write_bytes(b"target")
+    (src / "dirlink").symlink_to(real_dir, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        walk_directory(str(src))
 
 
 # --- deterministic_directory_zip ---
@@ -199,6 +211,53 @@ def test_extract_zip_safely_extracts_normal_zip(tmp_path):
     extract_zip_safely(io.BytesIO(blob), str(dest))
     assert (dest / "a.txt").read_bytes() == b"hi"
     assert (dest / "sub" / "b.txt").read_bytes() == b"there"
+
+
+def test_extract_zip_safely_uses_private_modes(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    _materialize(src, {"a.txt": b"hi", "sub/b.txt": b"there"})
+    blob = b"".join(deterministic_directory_zip(str(src)))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    old_umask = os.umask(0o000)
+    try:
+        extract_zip_safely(io.BytesIO(blob), str(dest))
+    finally:
+        os.umask(old_umask)
+    assert (dest / "a.txt").read_bytes() == b"hi"
+    assert (dest / "sub" / "b.txt").read_bytes() == b"there"
+    assert stat.S_IMODE(os.lstat(dest / "a.txt").st_mode) == 0o600
+    assert stat.S_IMODE(os.lstat(dest / "sub").st_mode) == 0o700
+    assert stat.S_IMODE(os.lstat(dest / "sub" / "b.txt").st_mode) == 0o600
+
+
+def test_extract_zip_safely_refuses_preexisting_target(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    _materialize(src, {"a.txt": b"hi"})
+    blob = b"".join(deterministic_directory_zip(str(src)))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "a.txt").write_bytes(b"existing")
+    with pytest.raises(ValueError, match="already exists"):
+        extract_zip_safely(io.BytesIO(blob), str(dest))
+    assert (dest / "a.txt").read_bytes() == b"existing"
+
+
+def test_extract_zip_safely_refuses_symlink_target(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    _materialize(src, {"a.txt": b"hi"})
+    blob = b"".join(deterministic_directory_zip(str(src)))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"victim")
+    (dest / "a.txt").symlink_to(victim)
+    with pytest.raises(ValueError, match="symlink|already exists"):
+        extract_zip_safely(io.BytesIO(blob), str(dest))
+    assert victim.read_bytes() == b"victim"
 
 
 def test_extract_zip_safely_rejects_zip_slip_relative(tmp_path):
@@ -363,14 +422,14 @@ def test_walk_directory_default_raises_on_unreadable_entry(tmp_path, monkeypatch
     (src / "a.txt").write_bytes(b"ok")
     (src / "broken.txt").write_bytes(b"broken")
 
-    real_getsize = os.path.getsize
+    real_lstat = os.lstat
 
-    def flaky_getsize(p):
+    def flaky_lstat(p):
         if p.endswith("broken.txt"):
             raise PermissionError("simulated permission denied")
-        return real_getsize(p)
+        return real_lstat(p)
 
-    monkeypatch.setattr(os.path, "getsize", flaky_getsize)
+    monkeypatch.setattr(os, "lstat", flaky_lstat)
     with pytest.raises(ValueError, match="cannot stat"):
         walk_directory(str(src))
 
@@ -386,14 +445,14 @@ def test_walk_directory_ignore_unsendable_skips_unreadable(
     (src / "broken.txt").write_bytes(b"broken")
     (src / "b.txt").write_bytes(b"alsook")
 
-    real_getsize = os.path.getsize
+    real_lstat = os.lstat
 
-    def flaky_getsize(p):
+    def flaky_lstat(p):
         if p.endswith("broken.txt"):
             raise PermissionError("simulated permission denied")
-        return real_getsize(p)
+        return real_lstat(p)
 
-    monkeypatch.setattr(os.path, "getsize", flaky_getsize)
+    monkeypatch.setattr(os, "lstat", flaky_lstat)
     paths, num_files, num_bytes = walk_directory(str(src), ignore_unsendable=True)
     rels = sorted(os.path.relpath(p, str(src)) for p in paths)
     assert rels == ["a.txt", "b.txt"]

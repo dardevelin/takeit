@@ -9,7 +9,7 @@ prints to stdout, no file/sidecar artifacts.
 from click.testing import CliRunner
 
 from takeit.cli import _protocol as P
-from takeit.cli.cli import cmd_send
+from takeit.cli.cli import _escape_terminal_text, cmd_send
 
 # --- CLI argument validation (no network) ---
 
@@ -18,7 +18,7 @@ def test_text_flag_with_path_is_usage_error():
     """--text and a path positional together don't make sense."""
     runner = CliRunner()
     # We invoke `cmd_send` directly so we exercise its arg-validation
-    # without spinning up the wormhole/reactor stack.
+    # without spinning up the takeit/reactor stack.
     result = runner.invoke(cmd_send, ["--text", "hi", "/tmp/anything"])
     assert result.exit_code != 0
     # Specifically the mutual-exclusion error, not a fall-through "no
@@ -87,3 +87,12 @@ def test_text_offer_preserves_newlines():
     msg = P.build_offer_text(s)
     parsed = P.parse_offer(P.encode_message(msg))
     assert parsed["text"] == s
+
+
+def test_terminal_text_escapes_control_sequences():
+    text = "ok\x1b[2J\nnext\rline\x08"
+    escaped = _escape_terminal_text(text)
+    assert escaped == "ok\\x1b[2J\nnext\\x0dline\\x08"
+    assert "\x1b" not in escaped
+    assert "\r" not in escaped
+    assert "\x08" not in escaped

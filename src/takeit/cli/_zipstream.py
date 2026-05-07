@@ -12,10 +12,10 @@ on the receive side. We pin every wobble:
   format's epoch and the only value not subject to local-tz drift.
 - compress_type is ZIP_STORED. Compressors are not byte-stable across
   zlib versions/levels; STORED is. Also faster.
-- external_attr is fixed (0o600 for files, 0o755 | dir-bit for dirs).
-- Symlinks are NOT followed across the source-root boundary; symlinks
-  pointing within the root are dereferenced (the reader sees a normal
-  file in the zip), matching wormhole's behavior.
+- external_attr is fixed (0o600 for files, 0o700 | dir-bit for dirs).
+- Symlinks are refused. This avoids exfiltrating out-of-tree files and
+  closes the validate-then-open race where a symlink target changes after
+  the directory walk.
 
 The receive-side helper extract_zip_safely defends against the standard
 "zip-slip" class of attacks by validating each entry's resolved path
@@ -44,7 +44,7 @@ _FIXED_MTIME = (1980, 1, 1, 0, 0, 0)
 # DOS attributes. We pin both so the zip is byte-identical regardless of
 # what the source filesystem reports.
 _EXTERNAL_ATTR_FILE = 0o600 << 16
-_EXTERNAL_ATTR_DIR = (0o755 << 16) | 0x10  # MS-DOS directory bit
+_EXTERNAL_ATTR_DIR = (0o700 << 16) | 0x10  # MS-DOS directory bit
 
 # Read buffer for streaming source files. 64 KiB amortizes syscalls
 # without bloating peak memory; matches what `chunk_hashes_for_file`
@@ -55,14 +55,12 @@ _READ_CHUNK = 1 << 16
 def walk_directory(root, *, ignore_unsendable=False):
     """Walk `root`, returning (sorted_file_paths, num_files, num_bytes).
 
-    Sorting is lexicographic on POSIX-style relative paths. Symlinks
-    are categorized:
-    - Targets within `root` (after realpath) are followed and included.
-    - Targets outside `root` are refused with ValueError. Silently
-      following them would exfiltrate files the user didn't intend
-      to include in the transfer. This refusal is NOT optional —
-      `ignore_unsendable=True` does NOT relax it (out-of-root symlinks
-      are a privacy concern, not an IO/permission concern).
+    Sorting is lexicographic on POSIX-style relative paths. Symlinks are
+    refused even when they point inside `root`: the zip writer must reopen
+    files later, and following symlinks would leave a validate-then-open
+    TOCTOU window. This refusal is NOT optional — `ignore_unsendable=True`
+    does NOT relax it (symlinks are a privacy/race concern, not a routine
+    IO/permission concern).
 
     `ignore_unsendable=True`: when an entry can't be stat'd
     (PermissionError, FileNotFoundError on race, etc.), skip it with
@@ -78,23 +76,16 @@ def walk_directory(root, *, ignore_unsendable=False):
     for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
         # Sort in place so os.walk descends in deterministic order.
         dirnames.sort()
+        for dn in list(dirnames):
+            full = os.path.join(dirpath, dn)
+            if os.path.islink(full):
+                raise ValueError(f"symlink {full!r}; refusing")
         for fn in sorted(filenames):
             full = os.path.join(dirpath, fn)
-            # If the entry is a symlink, ensure its target falls inside
-            # the source root. Otherwise refuse — rather than silently
-            # follow it (privacy risk) or silently drop it (surprising).
-            # The privacy refusal stands regardless of ignore_unsendable.
             if os.path.islink(full):
-                target = os.path.realpath(full)
-                # commonpath raises on different drives (Windows); we
-                # use prefix-with-sep to be portable.
-                if not (target == root_real or target.startswith(root_real + os.sep)):
-                    raise ValueError(
-                        f"symlink {full!r} points outside the source "
-                        f"directory ({target!r}); refusing"
-                    )
+                raise ValueError(f"symlink {full!r}; refusing")
             try:
-                size = os.path.getsize(full)
+                st = os.lstat(full)
             except OSError as e:
                 if ignore_unsendable:
                     # Print to stderr; keep this module click-free so
@@ -105,8 +96,16 @@ def walk_directory(root, *, ignore_unsendable=False):
                     )
                     continue
                 raise ValueError(f"cannot stat {full!r}: {e}")
+            if not stat.S_ISREG(st.st_mode):
+                if ignore_unsendable:
+                    print(
+                        f"Skipping non-regular entry: {full!r}",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise ValueError(f"not a regular file: {full!r}")
             files.append(full)
-            num_bytes += size
+            num_bytes += st.st_size
     return files, len(files), num_bytes
 
 
@@ -157,7 +156,7 @@ def deterministic_directory_zip(root, *, ignore_unsendable=False):
     of on-disk mtime or filesystem permission noise. transfer_id derived
     from BLAKE2b over this stream is therefore stable across runs.
 
-    Errors during walking (out-of-root symlinks, unreadable entries) are
+    Errors during walking (symlinks, unreadable entries) are
     raised before any bytes are yielded — unless `ignore_unsendable=True`,
     which skips IO-failing entries with a stderr warning (privacy-failing
     symlinks still hard-refuse).
@@ -178,14 +177,24 @@ def deterministic_directory_zip(root, *, ignore_unsendable=False):
             zinfo = zipfile.ZipInfo(arcname, date_time=_FIXED_MTIME)
             zinfo.compress_type = zipfile.ZIP_STORED
             zinfo.external_attr = _EXTERNAL_ATTR_FILE
-            with open(full, "rb") as src:
-                with zf.open(zinfo, "w") as dst:
-                    while True:
-                        buf = src.read(_READ_CHUNK)
-                        if not buf:
-                            break
-                        dst.write(buf)
-                        yield from sink.drain()
+            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    raise ValueError(f"not a regular file: {full!r}")
+                src = os.fdopen(fd, "rb")
+                fd = None
+                with src:
+                    with zf.open(zinfo, "w") as dst:
+                        while True:
+                            buf = src.read(_READ_CHUNK)
+                            if not buf:
+                                break
+                            dst.write(buf)
+                            yield from sink.drain()
+            finally:
+                if fd is not None:
+                    os.close(fd)
             yield from sink.drain()
     finally:
         zf.close()
@@ -261,6 +270,8 @@ def extract_zip_safely(blob_or_file, dest):
       sender could otherwise plant a symlink to an attacker-chosen
       target, then a benign-looking subsequent file write through the
       symlink would overwrite the target.
+    - Existing targets are refused, including dangling symlinks.
+    - Extracted directories are mode 0700 and files are mode 0600.
     - Absolute paths inside the zip are refused early (a stricter form
       of the zip-slip check; matches the user's mental model of "this
       should land inside dest").
@@ -274,20 +285,52 @@ def extract_zip_safely(blob_or_file, dest):
         # Validate ALL entries before extracting any — partial extracts
         # on a malicious zip would leave the user with attacker-chosen
         # file fragments on disk.
+        targets = set()
+        entries = []
         for zinfo in zf.infolist():
-            _validate_zinfo(zinfo, dest_real)
+            target = _validate_zinfo(zinfo, dest_real)
+            if target in targets:
+                raise ValueError(f"duplicate zip entry target: {zinfo.filename!r}")
+            for prior_target, prior_is_dir in entries:
+                if target.startswith(prior_target + os.sep) and not prior_is_dir:
+                    raise ValueError(
+                        f"zip entry descends through file target: {zinfo.filename!r}"
+                    )
+                if prior_target.startswith(target + os.sep) and not zinfo.is_dir():
+                    raise ValueError(
+                        f"zip entry conflicts with child target: {zinfo.filename!r}"
+                    )
+            targets.add(target)
+            entries.append((target, zinfo.is_dir()))
+            if os.path.lexists(target):
+                raise ValueError(
+                    f"zip entry target already exists ({zinfo.filename!r}); refusing"
+                )
         for zinfo in zf.infolist():
-            target = os.path.join(dest_real, zinfo.filename)
+            target = _safe_target_path(zinfo.filename, dest_real)
             if zinfo.is_dir():
-                os.makedirs(target, exist_ok=True)
+                _makedirs_private(target, dest_real)
                 continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with zf.open(zinfo) as src, open(target, "wb") as dst:
-                while True:
-                    buf = src.read(_READ_CHUNK)
-                    if not buf:
-                        break
-                    dst.write(buf)
+            _makedirs_private(os.path.dirname(target), dest_real)
+            fd = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as dst:
+                    fd = None
+                    with zf.open(zinfo) as src:
+                        while True:
+                            buf = src.read(_READ_CHUNK)
+                            if not buf:
+                                break
+                            dst.write(buf)
+            except Exception:
+                if fd is not None:
+                    os.close(fd)
+                raise
 
 
 def _validate_zinfo(zinfo, dest_real):
@@ -296,12 +339,48 @@ def _validate_zinfo(zinfo, dest_real):
     if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
         # Unix absolute or Windows drive-prefixed
         raise ValueError(f"absolute path in zip entry: {name!r} (zip-slip attempt)")
-    # Resolve where the entry would land and ensure it's under dest.
-    target = os.path.realpath(os.path.join(dest_real, name))
-    if not (target == dest_real or target.startswith(dest_real + os.sep)):
+    target = _safe_target_path(name, dest_real)
+    symlink_component = _first_symlink_component(target, dest_real)
+    if symlink_component is not None:
+        raise ValueError(
+            f"zip entry crosses existing symlink {symlink_component!r}; refusing"
+        )
+    real_target = os.path.realpath(target)
+    if not (real_target == dest_real or real_target.startswith(dest_real + os.sep)):
         raise ValueError(f"zip entry escapes destination (zip-slip): {name!r}")
     # Reject symlink entries. The POSIX mode lives in the upper 16 bits
     # of external_attr; S_IFLNK == 0xA000.
     upper = zinfo.external_attr >> 16
     if stat.S_ISLNK(upper):
         raise ValueError(f"zip entry encodes a symlink ({name!r}); refusing")
+    return target
+
+
+def _safe_target_path(name, dest_real):
+    return os.path.normpath(os.path.join(dest_real, name))
+
+
+def _first_symlink_component(path, dest_real):
+    rel = os.path.relpath(path, dest_real)
+    cur = dest_real
+    for part in rel.split(os.sep):
+        if not part or part == ".":
+            continue
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return cur
+    return None
+
+
+def _makedirs_private(path, dest_real):
+    if path == dest_real:
+        return
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    cur = dest_real
+    rel = os.path.relpath(path, dest_real)
+    for part in rel.split(os.sep):
+        if not part or part == ".":
+            continue
+        cur = os.path.join(cur, part)
+        if cur != dest_real:
+            os.chmod(cur, 0o700)

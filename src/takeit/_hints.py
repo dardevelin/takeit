@@ -1,5 +1,8 @@
 # Originally from magic-wormhole (MIT, (c) 2015 Brian Warner).
 # Lifted into takeit; see NOTICE for the full list.
+import ipaddress
+import math
+import numbers
 from collections import namedtuple
 
 from twisted.internet.abstract import isIPAddress, isIPv6Address
@@ -68,20 +71,43 @@ def parse_tcp_v1_hint(hint):  # hint_struct -> hint_obj
     if not ("hostname" in hint and isinstance(hint["hostname"], str)):
         log.msg(f"invalid hostname in hint: {hint!r}")
         return None
-    if not ("port" in hint and isinstance(hint["port"], int)):
+    if not (
+        "port" in hint
+        and isinstance(hint["port"], int)
+        and not isinstance(hint["port"], bool)
+        and 1 <= hint["port"] <= 65535
+    ):
         log.msg(f"invalid port in hint: {hint!r}")
         return None
     priority = hint.get("priority", 0.0)
+    if (
+        not isinstance(priority, numbers.Real)
+        or isinstance(priority, bool)
+        or not math.isfinite(priority)
+    ):
+        log.msg(f"invalid priority in hint: {hint!r}")
+        return None
     if hint_type == "direct-tcp-v1":
-        return DirectTCPV1Hint(hint["hostname"], hint["port"], priority)
+        try:
+            ip = ipaddress.ip_address(hint["hostname"])
+        except ValueError:
+            log.msg(f"direct hint hostname is not an IP literal: {hint!r}")
+            return None
+        if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local:
+            log.msg(f"unsafe direct hint address: {hint!r}")
+            return None
+        return DirectTCPV1Hint(str(ip), hint["port"], float(priority))
     else:
-        return TorTCPV1Hint(hint["hostname"], hint["port"], priority)
+        return TorTCPV1Hint(hint["hostname"], hint["port"], float(priority))
 
 
 def parse_hint(hint_struct):
     hint_type = hint_struct.get("type", "")
     if hint_type == "relay-v1":
         # the struct can include multiple ways to reach the same relay
+        if not isinstance(hint_struct.get("hints"), list):
+            log.msg(f"invalid relay-v1 hints: {hint_struct!r}")
+            return None
         rhints = filter(
             lambda h: h,  # drop None (unrecognized)
             [parse_tcp_v1_hint(rh) for rh in hint_struct["hints"]],

@@ -5,7 +5,7 @@ Two subcommands: ``send`` and ``receive``. Aliases ``tx`` / ``rx``. The
 protocol shape (offer → answer → subchannel header carrying chunk_hashes
 → chunks_have reply → chunk frames → complete → done) is defined in
 `takeit.cli._protocol`, and resume sidecar files in `takeit.cli._resume`.
-This module is the Twisted + Click glue that wires it to a real wormhole
+This module is the Twisted + Click glue that wires it to a real takeit
 + dilation transport.
 """
 
@@ -13,6 +13,7 @@ import base64
 import os
 import shutil
 import sys
+import tempfile
 
 import click
 import tqdm as tqdm_module
@@ -23,6 +24,8 @@ from twisted.internet.threads import deferToThread
 from twisted.python import log
 
 import takeit
+from takeit._code import validate_code
+from takeit._code_format import parse_code
 from takeit.cli import _protocol as P
 from takeit.cli import _resume as R
 from takeit.cli import _spinner as Sp
@@ -153,7 +156,7 @@ def _default_output_dir():
 def _resolve_output_target(output_file, sender_name):
     """Resolve --output-file into a (parent_dir, final_name) pair.
 
-    Wormhole-compatible semantics:
+    takeit-compatible semantics:
     - None → (default_output_dir, sender_name).
     - existing directory → (that_directory, sender_name).
     - non-existing path with existing parent → (parent, basename)
@@ -426,7 +429,7 @@ def cmd_receive(
     If no CODE is given, you'll be prompted to type one with tab-completion
     against the wordlist. Pass ``--allocate`` to invert the direction:
     takeit will pick a code, you read it to the sender, and the sender
-    types it via ``takeit send --code <words> file.pdf``.
+    types it via ``takeit send --code <code> file.pdf``.
     """
     if allocate and code is not None:
         raise click.UsageError(
@@ -486,7 +489,7 @@ def cmd_completion(shell):
 main.add_command(cmd_send, name="tx")
 main.add_command(cmd_receive, name="rx")
 # `recv` is shell-muscle-memory; `recieve` is the typo-tolerant alias
-# that upstream wormhole introduced. Both route to cmd_receive.
+# inherited from the upstream project. Both route to cmd_receive.
 main.add_command(cmd_receive, name="recv")
 main.add_command(cmd_receive, name="recieve")
 
@@ -537,6 +540,12 @@ def _run_send(
     chunk_size = P.DEFAULT_CHUNK_SIZE
     is_dir = os.path.isdir(path)
 
+    try:
+        if explicit_code:
+            _validate_code_before_takeit(explicit_code, verify)
+    except Exception as exc:
+        sys.exit(_handle_cli_error(exc, debug))
+
     if is_dir:
         # Directory transfer: stream the source through a deterministic
         # zip into a temp file, hashing as we go. The temp file then
@@ -582,6 +591,7 @@ def _run_send(
                 kind=P.KIND_DIRECTORY,
                 num_files=num_files,
                 num_bytes=num_bytes,
+                explicit_code_prevalidated=True,
             )
         finally:
             try:
@@ -635,6 +645,7 @@ def _run_send(
         hide_progress,
         debug,
         kind=P.KIND_FILE,
+        explicit_code_prevalidated=True,
     )
 
 
@@ -653,14 +664,11 @@ def _run_send_text(
     """Send a text message inline. The offer IS the payload — no
     chunked stream, no dilation. Same accept/decline gate as files
     so the receiver still gets to consent before the text appears."""
-    w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         if explicit_code:
-            # HYP-421: validate BEFORE w.set_code so we don't commit an
-            # unsafe (words-only-no-verify) code into the state machine.
-            # Boss.do_got_code would otherwise derive the legacy tag
-            # and Mailbox would publish before we got to abort.
-            _validate_words_only_handoff(explicit_code, verify)
+            _validate_code_before_takeit(explicit_code, verify)
+        w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
+        if explicit_code:
             w.set_code(explicit_code)
         else:
             # allocate_code always produces a canonical <locator>:<words>
@@ -722,17 +730,17 @@ def _do_send(
     kind,
     num_files=None,
     num_bytes=None,
+    explicit_code_prevalidated=False,
 ):
     """Common send flow once the payload is hashed. `payload_path` is the
     file on disk to chunk-stream (the source file for KIND_FILE, the
     materialized temp zip for KIND_DIRECTORY). `name` is the user-facing
     name (filename or dir_name) embedded in the offer."""
-    w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
+        if explicit_code and not explicit_code_prevalidated:
+            _validate_code_before_takeit(explicit_code, verify)
+        w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
         if explicit_code:
-            # HYP-421: validate BEFORE w.set_code so we don't commit an
-            # unsafe (words-only-no-verify) code into the state machine.
-            _validate_words_only_handoff(explicit_code, verify)
             w.set_code(explicit_code)
         else:
             # allocate_code always produces a canonical <locator>:<words>
@@ -1024,6 +1032,13 @@ def _rmtree_quiet(path):
         pass
 
 
+def _validate_code_before_takeit(code, verify):
+    """Validate user-provided code before constructing a takeit session."""
+    validate_code(code)
+    parse_code(code)
+    _validate_words_only_handoff(code, verify)
+
+
 # ---- Receive flow ----
 
 
@@ -1041,7 +1056,6 @@ def _run_receive(
     code_length,
     debug,
 ):
-    w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
     try:
         # Validate --output-file shape up front so a typo'd path errors
         # BEFORE the user types a code. We can't fully resolve yet —
@@ -1059,17 +1073,31 @@ def _run_receive(
                 click.echo(f"Error: {e}", err=True)
                 sys.exit(1)
 
+        # Resolve any user-provided code before constructing the takeit session.
+        # HYP-421's earlier fix validated before set_code/choose_words, but
+        # still created the rendezvous object first. A refused words-only
+        # handoff must not even start the relay connector.
+        if not allocate:
+            if code is None:
+                from .. import _rlcompleter
+
+                code = yield _rlcompleter.prompt_code_with_completion(
+                    "takeit code: ",
+                    reactor,
+                    validate=lambda c: _validate_code_before_takeit(c, verify),
+                    expected_code_length=code_length,
+                )
+            else:
+                _validate_code_before_takeit(code, verify)
+
+        w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
+
         # Three code-resolution paths:
         # 1. --allocate: takeit picks a code, prints it; sender types it
         #    in via `takeit send --code ...`. Inverts the direction.
         # 2. positional code given: caller already has the code; set it.
-        # 3. neither: drop into a readline prompt with tab completion
-        #    against the local PGP wordlist.
-        # The interactive prompt's helper runs in a worker thread;
-        # `input_with_completion` returns whether completion was used
-        # (we discard that — the helper has already submitted the
-        # code via choose_words, which fires Code.finished_input which
-        # fires Boss.got_code and Key.got_code).
+        # 3. neither: we already prompted with local tab-completion above,
+        #    before the takeit session existed; now commit the validated code.
         if allocate:
             # allocate_code always produces a canonical <locator>:<words>
             # code post-HYP-406, so no validation needed here.
@@ -1078,26 +1106,7 @@ def _run_receive(
             click.echo(f"takeit code: {code}")
             click.echo("On the sending machine, run:")
             click.echo(f"    takeit send --code {code} <file>")
-        elif code is None:
-            # Interactive prompt. HYP-421: pass validate= to the
-            # rlcompleter so the words-only-no-verify check fires
-            # AFTER the user presses Enter but BEFORE the typed code
-            # gets committed to the state machine via choose_words.
-            from .. import _rlcompleter
-
-            helper = w.input_code()
-            yield _rlcompleter.input_with_completion(
-                "takeit code: ",
-                helper,
-                reactor,
-                validate=lambda c: _validate_words_only_handoff(c, verify),
-            )
-            code = yield w.get_code()
         else:
-            # Positional code given on the CLI. HYP-421: validate
-            # BEFORE w.set_code so we don't commit unsafe shapes
-            # into the state machine.
-            _validate_words_only_handoff(code, verify)
             w.set_code(code)
 
         if verify:
@@ -1128,17 +1137,19 @@ def _run_receive(
             sys.exit(1)
 
         if offer["kind"] == P.KIND_TEXT:
-            # Typing the code IS the consent for text — wormhole's
+            # Typing the code IS the consent for text — takeit's
             # behavior. No filesystem side effect, nothing to "accept";
             # just print the message and close.
             text = offer["text"]
             w.send_message(P.encode_message(P.build_answer(True)))
-            # Print the text exactly as sent — no quoting, no extra
-            # newline beyond what the sender included.
-            click.echo(text, nl=False)
+            # Print the text without adding framing. Terminal control
+            # bytes are escaped so an authenticated peer cannot move the
+            # cursor, clear the screen, or spoof shell output.
+            terminal_text = _escape_terminal_text(text)
+            click.echo(terminal_text, nl=False)
             # If the sender's text didn't end with a newline, finish
             # the line so the user's prompt isn't glued to the message.
-            if not text.endswith("\n"):
+            if not terminal_text.endswith("\n"):
                 click.echo()
             # Same close handshake as file/dir for protocol uniformity.
             complete_payload = yield w.get_message()
@@ -1322,8 +1333,10 @@ def _run_receive(
                 sys.exit(1)
             os.unlink(partial_path)
         else:  # KIND_DIRECTORY: extract zip into a tempdir, atomic-rename
-            extract_tmp = f"{dest_path}.takeit-extract-{os.getpid()}"
-            os.makedirs(extract_tmp, exist_ok=False)
+            extract_tmp = tempfile.mkdtemp(
+                prefix=f".{final_name[:48]}.takeit-extract-",
+                dir=parent_real,
+            )
             try:
                 yield deferToThread(Z.extract_zip_safely, partial_path, extract_tmp)
                 # TOCTOU-safe atomic rename. os.rename refuses on Linux
@@ -1650,6 +1663,23 @@ def _pretty_size(n):
         f /= 1024
 
 
+def _escape_terminal_text(text):
+    """Escape terminal control bytes in received inline text."""
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if ch in ("\n", "\t"):
+            out.append(ch)
+        elif cp < 0x20 or cp == 0x7F or 0x80 <= cp <= 0x9F:
+            if cp <= 0xFF:
+                out.append(f"\\x{cp:02x}")
+            else:
+                out.append(f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _validate_words_only_handoff(code, verify):
     """Refuse a words-only `code` unless `--verify` was passed (HYP-416).
 
@@ -1694,10 +1724,10 @@ def _validate_words_only_handoff(code, verify):
 
 def format_verifier(verifier):
     """Render the protocol's verifier bytes as four 4-char hex groups
-    separated by dashes (wormhole's convention).
+    separated by dashes (takeit's convention).
 
     Only the first 8 bytes are displayed — that's 64 bits of SAS, plenty
-    for visual comparison and matching wormhole's UX exactly. Comparing
+    for visual comparison and matching takeit's UX exactly. Comparing
     longer strings out-of-band is error-prone, and the underlying SPAKE2
     transcript already binds the full key.
     """
@@ -1709,7 +1739,7 @@ def format_verifier(verifier):
 def _confirm_verifier(w):
     """If --verify was set, surface the SAS and block until the user
     presses Enter. Ctrl-C aborts: callers should treat the raised
-    KeyboardInterrupt as user-declined and close the wormhole."""
+    KeyboardInterrupt as user-declined and close the takeit session."""
     verifier = yield w.get_verifier()
     click.echo(f"Verifier: {format_verifier(verifier)}")
     click.echo(
