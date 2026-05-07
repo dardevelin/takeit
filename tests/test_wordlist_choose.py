@@ -3,6 +3,7 @@ Tests for PGPWordList.choose_words — the function takeit uses to generate
 codes. Upstream wormhole tested completion behavior; takeit also needs to
 trust the generation behavior since codes are now produced locally.
 """
+
 import re
 
 import pytest
@@ -44,6 +45,7 @@ def test_alternates_odd_even_wordlists(wl):
     Verify takeit retains this property.
     """
     from takeit._wordlist import even_words_lowercase, odd_words_lowercase
+
     code = wl.choose_words(4)
     words = code.split("-")
     assert words[0] in odd_words_lowercase

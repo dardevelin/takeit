@@ -6,6 +6,7 @@ class WelcomeError(WormholeError):
     """
     The relay server told us to signal an error, probably because our version
     is too old to possibly work. The server said:"""
+
     pass
 
 
@@ -20,6 +21,7 @@ class WrongPasswordError(WormholeError):
     wrong, or a would-be man-in-the-middle attacker guessed incorrectly. Try
     sending the file again.
     """
+
     # or the data blob was corrupted, and that's why decrypt failed
     pass
 
@@ -52,4 +54,3 @@ class WormholeClosed(Exception):
 
 class _UnknownPhaseError(Exception):
     """internal exception type, for tests."""
-

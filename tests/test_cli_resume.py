@@ -1,20 +1,28 @@
 """
 Tests for the resume sidecar module.
 """
+
 import hashlib
 import json
 import os
 
-import pytest
-
 from takeit.cli._resume import (
-    META_SUFFIX, PARTIAL_SUFFIX, ReceiverStateThrottle, SENT_META_SUFFIX,
-    b64, can_resume_with, cleanup_orphan_tmp_files, cleanup_receiver,
-    load_receiver_state, load_sender_cache, receiver_paths,
-    save_receiver_state, save_sender_cache, sender_cache_path,
+    META_SUFFIX,
+    PARTIAL_SUFFIX,
+    SENT_META_SUFFIX,
+    ReceiverStateThrottle,
+    b64,
+    can_resume_with,
+    cleanup_orphan_tmp_files,
+    cleanup_receiver,
+    load_receiver_state,
+    load_sender_cache,
+    receiver_paths,
+    save_receiver_state,
+    save_sender_cache,
+    sender_cache_path,
     verify_chunks_have,
 )
-
 
 # --- path helpers ---
 
@@ -40,7 +48,8 @@ def test_save_then_load_round_trips(tmp_path):
         size=100,
         chunk_size=50,
         chunk_hashes_b64=["aGFzaDA=", "aGFzaDE="],
-        chunks_have=[0])
+        chunks_have=[0],
+    )
     state = load_receiver_state(meta_path)
     assert state["transfer_id"] == "dGlk"
     assert state["size"] == 100
@@ -95,11 +104,19 @@ def test_chunks_have_is_deduped_and_sorted(tmp_path):
 # --- can_resume_with ---
 
 
-def _state(transfer_id="tid", size=100, chunk_size=50,
-           chunk_hashes=("h0", "h1"), chunks_have=(0,)):
+def _state(
+    transfer_id="tid",
+    size=100,
+    chunk_size=50,
+    chunk_hashes=("h0", "h1"),
+    chunks_have=(0,),
+):
     return {
-        "transfer_id": transfer_id, "size": size, "chunk_size": chunk_size,
-        "chunk_hashes": list(chunk_hashes), "chunks_have": list(chunks_have),
+        "transfer_id": transfer_id,
+        "size": size,
+        "chunk_size": chunk_size,
+        "chunk_hashes": list(chunk_hashes),
+        "chunks_have": list(chunks_have),
     }
 
 
@@ -146,8 +163,7 @@ def test_cleanup_removes_both_files(tmp_path):
 
 def test_cleanup_tolerates_missing_files(tmp_path):
     """Cleanup should not raise if either file is already gone."""
-    cleanup_receiver(str(tmp_path / "absent.partial"),
-                     str(tmp_path / "absent.meta"))
+    cleanup_receiver(str(tmp_path / "absent.partial"), str(tmp_path / "absent.meta"))
 
 
 # --- sender-side cache ---
@@ -157,8 +173,9 @@ def test_sender_cache_round_trips_for_unchanged_file(tmp_path):
     src = tmp_path / "src.bin"
     src.write_bytes(b"x" * 100)
     cache = sender_cache_path(str(src))
-    save_sender_cache(cache, str(src), 50,
-                     content_hash_b64="ch", chunk_hashes_b64=["h0", "h1"])
+    save_sender_cache(
+        cache, str(src), 50, content_hash_b64="ch", chunk_hashes_b64=["h0", "h1"]
+    )
     loaded = load_sender_cache(cache, str(src))
     assert loaded is not None
     assert loaded["chunk_size"] == 50
@@ -191,10 +208,17 @@ def test_sender_cache_returns_none_when_source_missing(tmp_path):
     cache = str(tmp_path / "x.cache")
     # Write a cache for a nonexistent source — load should refuse.
     with open(cache, "w") as f:
-        json.dump({
-            "size": 1, "mtime_ns": 0, "inode": 0, "chunk_size": 1,
-            "content_hash": "x", "chunk_hashes": [],
-        }, f)
+        json.dump(
+            {
+                "size": 1,
+                "mtime_ns": 0,
+                "inode": 0,
+                "chunk_size": 1,
+                "content_hash": "x",
+                "chunk_hashes": [],
+            },
+            f,
+        )
     assert load_sender_cache(cache, str(tmp_path / "absent.bin")) is None
 
 
@@ -215,6 +239,7 @@ def test_sender_cache_returns_none_on_corrupt_json(tmp_path):
 
 def test_b64_round_trips():
     from takeit.cli._resume import b64d
+
     data = b"\x00\x01\x02\xff"
     assert b64d(b64(data)) == data
 
@@ -231,11 +256,16 @@ def test_verify_chunks_have_returns_all_when_bytes_match(tmp_path):
     payload = b"abc" * 100  # 300 bytes = 6 chunks of 50
     partial = tmp_path / "f.bin.partial"
     partial.write_bytes(payload)
-    chunk_hashes = [_h(payload[i:i + chunk_size])
-                    for i in range(0, len(payload), chunk_size)]
+    chunk_hashes = [
+        _h(payload[i : i + chunk_size]) for i in range(0, len(payload), chunk_size)
+    ]
     verified = verify_chunks_have(
-        str(partial), len(payload), chunk_size,
-        chunk_hashes, claimed_chunks_have=[0, 1, 2, 3, 4, 5])
+        str(partial),
+        len(payload),
+        chunk_size,
+        chunk_hashes,
+        claimed_chunks_have=[0, 1, 2, 3, 4, 5],
+    )
     assert verified == {0, 1, 2, 3, 4, 5}
 
 
@@ -244,16 +274,21 @@ def test_verify_chunks_have_drops_corrupted_chunk(tmp_path):
     expected hash. verify_chunks_have drops index 2 silently."""
     chunk_size = 50
     payload = b"abc" * 100
-    chunk_hashes = [_h(payload[i:i + chunk_size])
-                    for i in range(0, len(payload), chunk_size)]
+    chunk_hashes = [
+        _h(payload[i : i + chunk_size]) for i in range(0, len(payload), chunk_size)
+    ]
     # Corrupt chunk 2 on disk
     corrupted = bytearray(payload)
     corrupted[100:150] = b"X" * 50
     partial = tmp_path / "f.bin.partial"
     partial.write_bytes(bytes(corrupted))
     verified = verify_chunks_have(
-        str(partial), len(payload), chunk_size, chunk_hashes,
-        claimed_chunks_have=[0, 1, 2, 3])
+        str(partial),
+        len(payload),
+        chunk_size,
+        chunk_hashes,
+        claimed_chunks_have=[0, 1, 2, 3],
+    )
     assert verified == {0, 1, 3}
 
 
@@ -264,8 +299,12 @@ def test_verify_chunks_have_drops_out_of_range_indices(tmp_path):
     partial.write_bytes(payload)
     chunk_hashes = [_h(payload[:50]), _h(payload[50:])]
     verified = verify_chunks_have(
-        str(partial), len(payload), chunk_size, chunk_hashes,
-        claimed_chunks_have=[0, 5, -1, 1])
+        str(partial),
+        len(payload),
+        chunk_size,
+        chunk_hashes,
+        claimed_chunks_have=[0, 5, -1, 1],
+    )
     assert verified == {0, 1}
 
 
@@ -278,8 +317,8 @@ def test_verify_chunks_have_handles_short_last_chunk(tmp_path):
     partial.write_bytes(payload)
     chunk_hashes = [_h(b"a" * 50), _h(b"b" * 30)]
     verified = verify_chunks_have(
-        str(partial), len(payload), chunk_size, chunk_hashes,
-        claimed_chunks_have=[0, 1])
+        str(partial), len(payload), chunk_size, chunk_hashes, claimed_chunks_have=[0, 1]
+    )
     assert verified == {0, 1}
 
 
@@ -288,8 +327,8 @@ def test_verify_chunks_have_returns_empty_for_missing_partial(tmp_path):
     'nothing resumable, start fresh'."""
     chunk_hashes = [_h(b"x")]
     verified = verify_chunks_have(
-        str(tmp_path / "absent.partial"), 1, 1, chunk_hashes,
-        claimed_chunks_have=[0])
+        str(tmp_path / "absent.partial"), 1, 1, chunk_hashes, claimed_chunks_have=[0]
+    )
     assert verified == set()
 
 
@@ -304,8 +343,7 @@ def test_cleanup_orphan_tmp_removes_only_tmp_meta_files(tmp_path):
     (tmp_path / "unrelated.txt").write_text("keep")
     cleanup_orphan_tmp_files(str(tmp_path))
     remaining = sorted(p.name for p in tmp_path.iterdir())
-    assert remaining == ["unrelated.txt", "x.takeit-partial",
-                         "x.takeit-partial.meta"]
+    assert remaining == ["unrelated.txt", "x.takeit-partial", "x.takeit-partial.meta"]
 
 
 def test_cleanup_orphan_tmp_handles_missing_directory(tmp_path):
@@ -342,8 +380,9 @@ def _read_chunks_have(meta_path):
 def test_throttle_initialize_writes_immediately(tmp_path):
     meta = str(tmp_path / "f.meta")
     clock = _FakeClock()
-    t = ReceiverStateThrottle(meta, "tid", 100, 50, ["h0", "h1"],
-                              interval=2.0, clock=clock)
+    t = ReceiverStateThrottle(
+        meta, "tid", 100, 50, ["h0", "h1"], interval=2.0, clock=clock
+    )
     t.initialize({0})
     assert _read_chunks_have(meta) == {0}
 
@@ -351,8 +390,9 @@ def test_throttle_initialize_writes_immediately(tmp_path):
 def test_throttle_update_buffers_within_interval(tmp_path):
     meta = str(tmp_path / "f.meta")
     clock = _FakeClock()
-    t = ReceiverStateThrottle(meta, "tid", 100, 50, ["h0", "h1"],
-                              interval=2.0, clock=clock)
+    t = ReceiverStateThrottle(
+        meta, "tid", 100, 50, ["h0", "h1"], interval=2.0, clock=clock
+    )
     t.initialize(set())
     # Many updates within interval → only the initial write hit disk
     clock.advance(0.5)
@@ -368,8 +408,9 @@ def test_throttle_update_buffers_within_interval(tmp_path):
 def test_throttle_update_writes_when_interval_elapses(tmp_path):
     meta = str(tmp_path / "f.meta")
     clock = _FakeClock()
-    t = ReceiverStateThrottle(meta, "tid", 100, 50, ["h0", "h1"],
-                              interval=2.0, clock=clock)
+    t = ReceiverStateThrottle(
+        meta, "tid", 100, 50, ["h0", "h1"], interval=2.0, clock=clock
+    )
     t.initialize(set())
     clock.advance(2.5)  # past interval
     t.update({0, 1})
@@ -379,8 +420,9 @@ def test_throttle_update_writes_when_interval_elapses(tmp_path):
 def test_throttle_flush_writes_regardless_of_interval(tmp_path):
     meta = str(tmp_path / "f.meta")
     clock = _FakeClock()
-    t = ReceiverStateThrottle(meta, "tid", 100, 50, ["h0", "h1"],
-                              interval=10.0, clock=clock)
+    t = ReceiverStateThrottle(
+        meta, "tid", 100, 50, ["h0", "h1"], interval=10.0, clock=clock
+    )
     t.initialize(set())
     t.update({0, 1, 2})  # buffered (within interval)
     assert _read_chunks_have(meta) == set()  # not flushed yet
@@ -402,11 +444,13 @@ def test_throttle_amortizes_writes_for_long_transfer(tmp_path):
         return real_save(*args, **kwargs)
 
     import takeit.cli._resume as resume_mod
+
     monkey_orig = resume_mod.save_receiver_state
     try:
         resume_mod.save_receiver_state = counting_save
-        t = ReceiverStateThrottle(meta, "tid", 100, 50, ["h0", "h1"],
-                                  interval=2.0, clock=clock)
+        t = ReceiverStateThrottle(
+            meta, "tid", 100, 50, ["h0", "h1"], interval=2.0, clock=clock
+        )
         t.initialize(set())
         for i in range(1000):
             clock.advance(0.001)  # 1 ms each, total 1 second

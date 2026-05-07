@@ -1,8 +1,8 @@
 __version__ = "0.0.1"
 
-from .api import create, DEFAULT_RELAYS
-from ._status import WormholeStatus, DilationStatus
 from ._dilation.subchannel import SubchannelAddress
+from ._status import DilationStatus, WormholeStatus
+from .api import DEFAULT_RELAYS, create
 
 __all__ = [
     "__version__",

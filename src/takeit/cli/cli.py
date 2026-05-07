@@ -8,6 +8,7 @@ protocol shape (offer → answer → subchannel header carrying chunk_hashes
 This module is the Twisted + Click glue that wires it to a real wormhole
 + dilation transport.
 """
+
 import base64
 import os
 import shutil
@@ -38,11 +39,20 @@ def _make_progress_bar(total_bytes, initial_bytes=0, desc="transfer"):
     same `update`, `close`, `__enter__`, and `__exit__` surface.
     """
     if not sys.stdout.isatty():
+
         class _Noop:
-            def update(self, n): pass
-            def close(self): pass
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
+            def update(self, n):
+                pass
+
+            def close(self):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
         return _Noop()
     bar = tqdm_module.tqdm(
         total=total_bytes,
@@ -119,8 +129,12 @@ def _default_output_dir():
 
 @click.group(invoke_without_command=False)
 @click.version_option(takeit.__version__, prog_name="takeit")
-@click.option("--debug", is_flag=True, default=False,
-              help="Print Twisted tracebacks on errors (verbose).")
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help="Print Twisted tracebacks on errors (verbose).",
+)
 @click.pass_context
 def main(ctx, debug):
     """takeit — securely transfer files between computers, peer-to-peer."""
@@ -129,25 +143,48 @@ def main(ctx, debug):
 
 
 @main.command("send")
-@click.argument("path", required=False,
-                type=click.Path(dir_okay=True, resolve_path=True))
-@click.option("--text", "text_input", default=None,
-              help="Send a short text message instead of a file. "
-                   "Use '-' to read the text from stdin.")
-@click.option("--code-length", type=int, default=3,
-              help="Number of words in the generated code (default: 3).")
-@click.option("--relay", "relays", multiple=True,
-              help="Override Nostr relay URLs (may be repeated).")
-@click.option("--code", "explicit_code", default=None,
-              help="Use this code instead of allocating a fresh one.")
-@click.option("--no-cache", is_flag=True, default=False,
-              help="Don't read or write the per-file chunk-hash cache.")
-@click.option("--qr", is_flag=True, default=False,
-              help="Also render the code as a terminal QR code "
-                   "(useful for hand-off to a phone).")
+@click.argument(
+    "path", required=False, type=click.Path(dir_okay=True, resolve_path=True)
+)
+@click.option(
+    "--text",
+    "text_input",
+    default=None,
+    help="Send a short text message instead of a file. "
+    "Use '-' to read the text from stdin.",
+)
+@click.option(
+    "--code-length",
+    type=int,
+    default=3,
+    help="Number of words in the generated code (default: 3).",
+)
+@click.option(
+    "--relay",
+    "relays",
+    multiple=True,
+    help="Override Nostr relay URLs (may be repeated).",
+)
+@click.option(
+    "--code",
+    "explicit_code",
+    default=None,
+    help="Use this code instead of allocating a fresh one.",
+)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Don't read or write the per-file chunk-hash cache.",
+)
+@click.option(
+    "--qr",
+    is_flag=True,
+    default=False,
+    help="Also render the code as a terminal QR code (useful for hand-off to a phone).",
+)
 @click.pass_context
-def cmd_send(ctx, path, text_input, code_length, relays,
-             explicit_code, no_cache, qr):
+def cmd_send(ctx, path, text_input, code_length, relays, explicit_code, no_cache, qr):
     """Send a file, directory, or text.
 
     Directories are streamed as a deterministic zip — the receiver
@@ -155,8 +192,7 @@ def cmd_send(ctx, path, text_input, code_length, relays,
     Use ``--text`` to send a short text message inline.
     """
     if text_input is not None and path is not None:
-        raise click.UsageError(
-            "--text and a file path are mutually exclusive")
+        raise click.UsageError("--text and a file path are mutually exclusive")
     if text_input is None and path is None:
         raise click.UsageError("Provide a path or --text")
     relay_list = list(relays) if relays else None
@@ -164,8 +200,7 @@ def cmd_send(ctx, path, text_input, code_length, relays,
     if text_input is not None:
         # Read from stdin if the value is "-".
         text = sys.stdin.read() if text_input == "-" else text_input
-        react(_run_send_text,
-              (text, code_length, relay_list, explicit_code, qr, debug))
+        react(_run_send_text, (text, code_length, relay_list, explicit_code, qr, debug))
         return
     # Path validation runs here (not in the Click annotation) so that
     # --text vs path mutual-exclusion can fire first with a clear
@@ -174,20 +209,35 @@ def cmd_send(ctx, path, text_input, code_length, relays,
         raise click.UsageError(f"Path {path!r} does not exist")
     if not os.access(path, os.R_OK):
         raise click.UsageError(f"Path {path!r} is not readable")
-    react(_run_send, (path, code_length, relay_list, explicit_code,
-                      not no_cache, qr, debug))
+    react(
+        _run_send,
+        (path, code_length, relay_list, explicit_code, not no_cache, qr, debug),
+    )
 
 
 @main.command("receive")
 @click.argument("code", required=False, default=None)
-@click.option("--accept/--no-accept", "-y/", "auto_accept", default=False,
-              help="Skip the y/N accept prompt (alias: -y).")
-@click.option("--relay", "relays", multiple=True,
-              help="Override Nostr relay URLs (may be repeated).")
-@click.option("--output-dir", "output_dir", type=click.Path(file_okay=False),
-              default=None,
-              help="Where to save the received file "
-                   "(default: ~/Downloads if it exists, else current dir).")
+@click.option(
+    "--accept/--no-accept",
+    "-y/",
+    "auto_accept",
+    default=False,
+    help="Skip the y/N accept prompt (alias: -y).",
+)
+@click.option(
+    "--relay",
+    "relays",
+    multiple=True,
+    help="Override Nostr relay URLs (may be repeated).",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Where to save the received file "
+    "(default: ~/Downloads if it exists, else current dir).",
+)
 @click.pass_context
 def cmd_receive(ctx, code, auto_accept, relays, output_dir):
     """Receive a file using a code.
@@ -198,9 +248,10 @@ def cmd_receive(ctx, code, auto_accept, relays, output_dir):
     relay_list = list(relays) if relays else None
     if output_dir is None:
         output_dir = _default_output_dir()
-    react(_run_receive,
-          (code, auto_accept, relay_list, output_dir,
-           ctx.obj.get("debug", False)))
+    react(
+        _run_receive,
+        (code, auto_accept, relay_list, output_dir, ctx.obj.get("debug", False)),
+    )
 
 
 @main.command("completion")
@@ -210,13 +261,19 @@ def cmd_completion(shell):
 
     Install for zsh:  ``eval "$(takeit completion zsh)"`` in ``.zshrc``.
     Install for bash: ``eval "$(takeit completion bash)"`` in ``.bashrc``.
-    Install for fish: ``takeit completion fish > ~/.config/fish/completions/takeit.fish``.
+    Install for fish: write ``takeit completion fish`` output to
+    ``~/.config/fish/completions/takeit.fish``.
     """
     from click.shell_completion import shell_complete
+
     # shell_complete prints to stdout and returns an exit code.
     code = shell_complete(
-        cli=main, ctx_args={}, prog_name="takeit",
-        complete_var="_TAKEIT_COMPLETE", instruction=f"{shell}_source")
+        cli=main,
+        ctx_args={},
+        prog_name="takeit",
+        complete_var="_TAKEIT_COMPLETE",
+        instruction=f"{shell}_source",
+    )
     sys.exit(code)
 
 
@@ -255,8 +312,7 @@ def _handle_cli_error(exc, debug):
 
 
 @inlineCallbacks
-def _run_send(reactor, path, code_length, relays, explicit_code,
-              use_cache, qr, debug):
+def _run_send(reactor, path, code_length, relays, explicit_code, use_cache, qr, debug):
     chunk_size = P.DEFAULT_CHUNK_SIZE
     is_dir = os.path.isdir(path)
 
@@ -275,16 +331,29 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         # filesystem (avoids ENOSPC surprises in /tmp on small partitions).
         tmp_zip_path = os.path.join(
             os.path.dirname(os.path.abspath(path)),
-            f".{dir_name}.takeit-zip-{os.getpid()}")
+            f".{dir_name}.takeit-zip-{os.getpid()}",
+        )
         try:
             size, content_hash, chunk_hashes = yield deferToThread(
-                Z.materialize_and_hash, path, tmp_zip_path, chunk_size)
+                Z.materialize_and_hash, path, tmp_zip_path, chunk_size
+            )
             yield _do_send(
-                reactor, tmp_zip_path, dir_name, size, content_hash,
-                chunk_hashes, chunk_size, code_length, relays,
-                explicit_code, qr, debug,
+                reactor,
+                tmp_zip_path,
+                dir_name,
+                size,
+                content_hash,
+                chunk_hashes,
+                chunk_size,
+                code_length,
+                relays,
+                explicit_code,
+                qr,
+                debug,
                 kind=P.KIND_DIRECTORY,
-                num_files=num_files, num_bytes=num_bytes)
+                num_files=num_files,
+                num_bytes=num_bytes,
+            )
         finally:
             try:
                 os.unlink(tmp_zip_path)
@@ -310,22 +379,36 @@ def _run_send(reactor, path, code_length, relays, explicit_code,
         # keepalives, dilation pings, UI). The save_sender_cache write is
         # tiny (one fsync) and runs on the reactor thread post-hash.
         size, content_hash, chunk_hashes = yield deferToThread(
-            P.chunk_hashes_for_file, path, chunk_size)
+            P.chunk_hashes_for_file, path, chunk_size
+        )
         if use_cache:
             R.save_sender_cache(
-                cache_path, path, chunk_size,
+                cache_path,
+                path,
+                chunk_size,
                 content_hash_b64=R.b64(content_hash),
-                chunk_hashes_b64=[R.b64(h) for h in chunk_hashes])
+                chunk_hashes_b64=[R.b64(h) for h in chunk_hashes],
+            )
 
     yield _do_send(
-        reactor, path, filename, size, content_hash, chunk_hashes,
-        chunk_size, code_length, relays, explicit_code, qr, debug,
-        kind=P.KIND_FILE)
+        reactor,
+        path,
+        filename,
+        size,
+        content_hash,
+        chunk_hashes,
+        chunk_size,
+        code_length,
+        relays,
+        explicit_code,
+        qr,
+        debug,
+        kind=P.KIND_FILE,
+    )
 
 
 @inlineCallbacks
-def _run_send_text(reactor, text, code_length, relays, explicit_code,
-                   qr, debug):
+def _run_send_text(reactor, text, code_length, relays, explicit_code, qr, debug):
     """Send a text message inline. The offer IS the payload — no
     chunked stream, no dilation. Same accept/decline gate as files
     so the receiver still gets to consent before the text appears."""
@@ -370,9 +453,24 @@ def _run_send_text(reactor, text, code_length, relays, explicit_code,
 
 
 @inlineCallbacks
-def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
-             chunk_size, code_length, relays, explicit_code, qr, debug,
-             *, kind, num_files=None, num_bytes=None):
+def _do_send(
+    reactor,
+    payload_path,
+    name,
+    size,
+    content_hash,
+    chunk_hashes,
+    chunk_size,
+    code_length,
+    relays,
+    explicit_code,
+    qr,
+    debug,
+    *,
+    kind,
+    num_files=None,
+    num_bytes=None,
+):
     """Common send flow once the payload is hashed. `payload_path` is the
     file on disk to chunk-stream (the source file for KIND_FILE, the
     materialized temp zip for KIND_DIRECTORY). `name` is the user-facing
@@ -395,12 +493,17 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
         # so the relay can't infer file size from offer ciphertext length.
         if kind == P.KIND_FILE:
             offer_msg = P.build_offer_file(
-                name, size, content_hash, chunk_size=chunk_size)
+                name, size, content_hash, chunk_size=chunk_size
+            )
         elif kind == P.KIND_DIRECTORY:
             offer_msg = P.build_offer_directory(
-                name, size, content_hash,
-                num_files=num_files, num_bytes=num_bytes,
-                chunk_size=chunk_size)
+                name,
+                size,
+                content_hash,
+                num_files=num_files,
+                num_bytes=num_bytes,
+                chunk_size=chunk_size,
+            )
         else:
             raise AssertionError(f"unsupported send kind: {kind!r}")
         w.send_message(P.encode_message(offer_msg))
@@ -431,7 +534,8 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
         if kind == P.KIND_DIRECTORY:
             click.echo(
                 f"Sending {name}/ ({num_files} files, "
-                f"{_pretty_size(num_bytes)} → {_pretty_size(size)} zipped)...")
+                f"{_pretty_size(num_bytes)} → {_pretty_size(size)} zipped)..."
+            )
         else:
             click.echo(f"Sending {name} ({_pretty_size(size)})...")
         # Maximum bytes that could be sent (full transfer). The actual
@@ -440,8 +544,8 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
         progress = _make_progress_bar(size, desc="sending")
         try:
             yield _send_chunks_over_subchannel(
-                reactor, ep, payload_path, chunk_size, chunk_hashes,
-                progress=progress)
+                reactor, ep, payload_path, chunk_size, chunk_hashes, progress=progress
+            )
         finally:
             progress.close()
 
@@ -455,8 +559,9 @@ def _do_send(reactor, payload_path, name, size, content_hash, chunk_hashes,
 
 
 @inlineCallbacks
-def _send_chunks_over_subchannel(reactor, endpoint, path, chunk_size,
-                                 chunk_hashes, progress=None):
+def _send_chunks_over_subchannel(
+    reactor, endpoint, path, chunk_size, chunk_hashes, progress=None
+):
     factory = _SenderFactory(path, chunk_size, chunk_hashes, progress)
     yield endpoint.connect(factory)
     yield factory.done
@@ -510,8 +615,7 @@ class _SenderProtocol(Protocol):
             return
         # Send the chunk_hashes header (HYP-392) — receiver needs it
         # before it can compute chunks_have.
-        self.transport.write(
-            P.build_subchannel_header(self._factory._chunk_hashes))
+        self.transport.write(P.build_subchannel_header(self._factory._chunk_hashes))
         # Wait for chunks_have reply on dataReceived; the pull producer
         # is registered only after we know which chunks to send.
 
@@ -519,8 +623,11 @@ class _SenderProtocol(Protocol):
         if not self._header_phase:
             # No further inbound bytes are expected on the sender side
             # post-header; if any arrive, the peer is misbehaving.
-            self._fail(P.ProtocolError(
-                "unexpected bytes from receiver after chunks_have reply"))
+            self._fail(
+                P.ProtocolError(
+                    "unexpected bytes from receiver after chunks_have reply"
+                )
+            )
             return
         try:
             for body in self._reply_decoder.feed(data):
@@ -537,7 +644,8 @@ class _SenderProtocol(Protocol):
         if chunks_have:
             click.echo(
                 f"Resuming: receiver already has {len(chunks_have)} "
-                f"chunk(s); sending {len(chunks_to_send)}")
+                f"chunk(s); sending {len(chunks_to_send)}"
+            )
         # Update the progress bar's total to reflect skipped chunks.
         if self._progress is not None:
             chunk_size = self._factory._chunk_size
@@ -576,8 +684,7 @@ class _SenderProtocol(Protocol):
         # Read off the reactor thread so a slow disk doesn't block other
         # reactor work (Nostr keepalives, dilation pings, etc.).
         self._read_in_flight = True
-        d = deferToThread(_read_chunk,
-                          self._fh, idx, self._factory._chunk_size)
+        d = deferToThread(_read_chunk, self._fh, idx, self._factory._chunk_size)
         d.addCallback(self._chunk_read, idx)
         d.addErrback(self._read_failed)
 
@@ -627,8 +734,11 @@ class _SenderProtocol(Protocol):
             self._factory.done.callback(None)
         else:
             self._factory.done.errback(
-                IOError(f"subchannel closed before transfer finished: "
-                        f"{reason.getErrorMessage()}"))
+                IOError(
+                    f"subchannel closed before transfer finished: "
+                    f"{reason.getErrorMessage()}"
+                )
+            )
 
 
 def _read_chunk(fh, idx, chunk_size):
@@ -662,8 +772,8 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
             output_dir_real = os.path.realpath(output_dir)
             if not os.path.isdir(output_dir_real):
                 click.echo(
-                    f"Error: --output-dir {output_dir!r} is not a directory",
-                    err=True)
+                    f"Error: --output-dir {output_dir!r} is not a directory", err=True
+                )
                 sys.exit(1)
         except OSError as e:
             click.echo(f"Error: cannot resolve --output-dir: {e}", err=True)
@@ -682,9 +792,9 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         # fires Boss.got_code and Key.got_code).
         if code is None:
             from .. import _rlcompleter
+
             helper = w.input_code()
-            yield _rlcompleter.input_with_completion(
-                "takeit code: ", helper, reactor)
+            yield _rlcompleter.input_with_completion("takeit code: ", helper, reactor)
             code = yield w.get_code()
         else:
             w.set_code(code)
@@ -699,8 +809,7 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         finally:
             spinner.stop()
         offer = P.parse_offer(offer_payload)
-        if offer["kind"] not in (
-                P.KIND_FILE, P.KIND_DIRECTORY, P.KIND_TEXT):
+        if offer["kind"] not in (P.KIND_FILE, P.KIND_DIRECTORY, P.KIND_TEXT):
             reason = f"{offer['kind']} transfer not yet supported by this client"
             w.send_message(P.encode_message(P.build_answer(False, reason)))
             click.echo(f"Error: {reason}", err=True)
@@ -729,8 +838,7 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
 
         if offer["kind"] == P.KIND_FILE:
             display_name = offer["filename"]
-            click.echo(
-                f"Offered: {display_name} ({_pretty_size(offer['size'])})")
+            click.echo(f"Offered: {display_name} ({_pretty_size(offer['size'])})")
             dest_path = os.path.join(output_dir_real, display_name)
             partial_path, meta_path = R.receiver_paths(dest_path)
         else:  # KIND_DIRECTORY
@@ -739,13 +847,13 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
                 f"Offered: {display_name}/ "
                 f"({offer['num_files']} files, "
                 f"{_pretty_size(offer['num_bytes'])} → "
-                f"{_pretty_size(offer['size'])} zipped)")
+                f"{_pretty_size(offer['size'])} zipped)"
+            )
             # The "dest path" for finalization is the directory itself.
             # The partial-and-meta sidecars hang off a sibling .zip path
             # so they don't collide with anything inside the final dir.
             dest_path = os.path.join(output_dir_real, display_name)
-            zip_marker = os.path.join(
-                output_dir_real, f"{display_name}.zip")
+            zip_marker = os.path.join(output_dir_real, f"{display_name}.zip")
             partial_path, meta_path = R.receiver_paths(zip_marker)
 
         # A4: refuse if anything already exists at dest_path. lstat (not
@@ -753,10 +861,12 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         # from os.path.exists but would be followed by os.rename.
         try:
             os.lstat(dest_path)
-            click.echo(f"Error: {dest_path} already exists; refusing to "
-                       "overwrite", err=True)
-            w.send_message(P.encode_message(
-                P.build_answer(False, "destination exists")))
+            click.echo(
+                f"Error: {dest_path} already exists; refusing to overwrite", err=True
+            )
+            w.send_message(
+                P.encode_message(P.build_answer(False, "destination exists"))
+            )
             yield w.close()
             sys.exit(1)
         except FileNotFoundError:
@@ -767,10 +877,12 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         # forbids separators in the offer's filename, so this is a
         # belt-and-suspenders check.
         if os.path.dirname(os.path.realpath(dest_path)) != output_dir_real:
-            click.echo("Error: refusing to write outside --output-dir",
-                       err=True)
-            w.send_message(P.encode_message(
-                P.build_answer(False, "destination escapes output_dir")))
+            click.echo("Error: refusing to write outside --output-dir", err=True)
+            w.send_message(
+                P.encode_message(
+                    P.build_answer(False, "destination escapes output_dir")
+                )
+            )
             yield w.close()
             sys.exit(1)
 
@@ -790,11 +902,9 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
 
         if not auto_accept:
             if prior_matches_offer:
-                click.echo(
-                    "(Partial transfer found on disk — resuming if accepted.)")
+                click.echo("(Partial transfer found on disk — resuming if accepted.)")
             if not click.confirm("Accept?", default=False):
-                w.send_message(P.encode_message(
-                    P.build_answer(False, "user declined")))
+                w.send_message(P.encode_message(P.build_answer(False, "user declined")))
                 yield w.close()
                 return
 
@@ -820,19 +930,26 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         progress = _make_progress_bar(offer["size"], desc="receiving")
         try:
             yield _receive_chunks_over_subchannel(
-                reactor, listener_ep, partial_path, meta_path, offer,
-                prior_matches=prior_matches_offer, progress=progress)
+                reactor,
+                listener_ep,
+                partial_path,
+                meta_path,
+                offer,
+                prior_matches=prior_matches_offer,
+                progress=progress,
+            )
         finally:
             progress.close()
 
         # Whole-file integrity check before atomic rename. Run off the
         # reactor thread — for a 10 GB file this is ~20 s of BLAKE2b.
-        actual_size, actual_hash = yield deferToThread(
-            P.hash_file, partial_path)
-        if actual_size != offer["size"] \
-                or actual_hash != offer["_content_hash_bytes"]:
-            click.echo("Error: integrity check failed; received bytes "
-                       "do not match the sender's hash", err=True)
+        actual_size, actual_hash = yield deferToThread(P.hash_file, partial_path)
+        if actual_size != offer["size"] or actual_hash != offer["_content_hash_bytes"]:
+            click.echo(
+                "Error: integrity check failed; received bytes "
+                "do not match the sender's hash",
+                err=True,
+            )
             R.cleanup_receiver(partial_path, meta_path)
             yield w.close()
             sys.exit(1)
@@ -848,17 +965,16 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
                     f"Error: {dest_path} appeared during transfer; "
                     "refusing to overwrite. The verified bytes are at "
                     f"{partial_path}; rename manually if desired.",
-                    err=True)
+                    err=True,
+                )
                 yield w.close()
                 sys.exit(1)
             os.unlink(partial_path)
         else:  # KIND_DIRECTORY: extract zip into a tempdir, atomic-rename
-            extract_tmp = (
-                f"{dest_path}.takeit-extract-{os.getpid()}")
+            extract_tmp = f"{dest_path}.takeit-extract-{os.getpid()}"
             os.makedirs(extract_tmp, exist_ok=False)
             try:
-                yield deferToThread(
-                    Z.extract_zip_safely, partial_path, extract_tmp)
+                yield deferToThread(Z.extract_zip_safely, partial_path, extract_tmp)
                 # TOCTOU-safe atomic rename. os.rename refuses on Linux
                 # if dest_path is a non-empty directory, but on macOS it
                 # may overwrite — the lstat pre-check + this re-check
@@ -868,7 +984,9 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
                     click.echo(
                         f"Error: {dest_path} appeared during transfer; "
                         f"refusing to overwrite. Extracted bytes are at "
-                        f"{extract_tmp}.", err=True)
+                        f"{extract_tmp}.",
+                        err=True,
+                    )
                     yield w.close()
                     sys.exit(1)
                 except FileNotFoundError:
@@ -887,25 +1005,24 @@ def _run_receive(reactor, code, auto_accept, relays, output_dir, debug):
         complete_payload = yield w.get_message()
         P.parse_simple_flag(complete_payload, "complete")
         w.send_message(P.encode_message(P.build_done()))
-        click.echo(f"Saved {dest_path}{'/' if offer['kind'] == P.KIND_DIRECTORY else ''}.")
+        suffix = "/" if offer["kind"] == P.KIND_DIRECTORY else ""
+        click.echo(f"Saved {dest_path}{suffix}.")
         yield w.close()
     except Exception as exc:
         sys.exit(_handle_cli_error(exc, debug))
 
 
 @inlineCallbacks
-def _receive_chunks_over_subchannel(reactor, listener_ep, partial_path,
-                                    meta_path, offer, prior_matches,
-                                    progress=None):
-    factory = _ReceiverFactory(
-        partial_path, meta_path, offer, prior_matches, progress)
+def _receive_chunks_over_subchannel(
+    reactor, listener_ep, partial_path, meta_path, offer, prior_matches, progress=None
+):
+    factory = _ReceiverFactory(partial_path, meta_path, offer, prior_matches, progress)
     yield listener_ep.listen(factory)
     yield factory.done
 
 
 class _ReceiverFactory(Factory):
-    def __init__(self, partial_path, meta_path, offer, prior_matches,
-                 progress=None):
+    def __init__(self, partial_path, meta_path, offer, prior_matches, progress=None):
         self._partial_path = partial_path
         self._meta_path = meta_path
         self._offer = offer
@@ -958,9 +1075,9 @@ class _ReceiverProtocol(Protocol):
         # the start (no umask 022 → world-readable window).
         partial = self._factory._partial_path
         if not os.path.exists(partial):
-            fd = os.open(partial,
-                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600)
+            fd = os.open(
+                partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+            )
             os.close(fd)
         self._fh = open(partial, "r+b")
 
@@ -993,17 +1110,19 @@ class _ReceiverProtocol(Protocol):
         # offer's size + chunk_size implies.
         expected_count = P.expected_chunk_count(self._size, self._chunk_size)
         if len(chunk_hashes) != expected_count:
-            self._fail(P.ProtocolError(
-                f"subchannel header has {len(chunk_hashes)} chunk_hashes "
-                f"but offer implies {expected_count}"))
+            self._fail(
+                P.ProtocolError(
+                    f"subchannel header has {len(chunk_hashes)} chunk_hashes "
+                    f"but offer implies {expected_count}"
+                )
+            )
             return
         self._chunk_hashes = chunk_hashes
         self._total_chunks = len(chunk_hashes)
         # Reconstruct the b64 list for the throttle/sidecar (sidecar
         # format hasn't changed — it stores chunk_hashes_b64 to match
         # against on resume).
-        chunk_hashes_b64 = [
-            base64.b64encode(h).decode("ascii") for h in chunk_hashes]
+        chunk_hashes_b64 = [base64.b64encode(h).decode("ascii") for h in chunk_hashes]
         self._throttle = R.ReceiverStateThrottle(
             self._factory._meta_path,
             transfer_id_b64=self._offer["transfer_id"],
@@ -1019,8 +1138,11 @@ class _ReceiverProtocol(Protocol):
             d = deferToThread(
                 R.verify_chunks_have,
                 self._factory._partial_path,
-                self._size, self._chunk_size,
-                chunk_hashes, claimed)
+                self._size,
+                self._chunk_size,
+                chunk_hashes,
+                claimed,
+            )
             d.addCallback(self._on_chunks_have_verified, claimed)
             d.addErrback(self._on_verify_failed)
         else:
@@ -1032,18 +1154,15 @@ class _ReceiverProtocol(Protocol):
         chunks_have = sorted(verified)
         dropped = len(claimed) - len(chunks_have)
         if dropped:
-            click.echo(
-                f"Resume: dropped {dropped} chunk(s) that failed "
-                "verification")
+            click.echo(f"Resume: dropped {dropped} chunk(s) that failed verification")
         if chunks_have:
-            click.echo(
-                f"Resuming: {len(chunks_have)} chunk(s) already on disk")
+            click.echo(f"Resuming: {len(chunks_have)} chunk(s) already on disk")
             # Mark resumed bytes as already-progressed.
             if self._progress is not None:
                 bytes_already = sum(
-                    min(self._chunk_size,
-                        self._size - i * self._chunk_size)
-                    for i in chunks_have)
+                    min(self._chunk_size, self._size - i * self._chunk_size)
+                    for i in chunks_have
+                )
                 try:
                     self._progress.update(bytes_already)
                 except Exception:
@@ -1065,12 +1184,12 @@ class _ReceiverProtocol(Protocol):
             for idx, chunk in self._frame_decoder.feed(data):
                 if idx >= self._total_chunks:
                     raise P.ProtocolError(
-                        f"chunk index {idx} >= total {self._total_chunks}")
+                        f"chunk index {idx} >= total {self._total_chunks}"
+                    )
                 if idx in self._chunks_have:
                     continue  # duplicate; ignore (sender bug or retransmit)
                 if not P.verify_chunk(chunk, self._chunk_hashes[idx]):
-                    raise P.ProtocolError(
-                        f"chunk {idx} hash mismatch")
+                    raise P.ProtocolError(f"chunk {idx} hash mismatch")
                 self._fh.seek(idx * self._chunk_size)
                 self._fh.write(chunk)
                 self._chunks_have.add(idx)
@@ -1100,17 +1219,20 @@ class _ReceiverProtocol(Protocol):
         if self._stopped:
             return  # _fail already errbacked
         if self._total_chunks is None:
-            self._factory.done.errback(P.ProtocolError(
-                "subchannel closed before header arrived"))
+            self._factory.done.errback(
+                P.ProtocolError("subchannel closed before header arrived")
+            )
             return
         if self._chunks_have == set(range(self._total_chunks)):
             self._factory.done.callback(None)
         else:
-            missing = sorted(set(range(self._total_chunks))
-                             - self._chunks_have)
-            self._factory.done.errback(P.ProtocolError(
-                f"subchannel closed with {len(missing)} chunks missing "
-                f"(first missing: {missing[:5]})"))
+            missing = sorted(set(range(self._total_chunks)) - self._chunks_have)
+            self._factory.done.errback(
+                P.ProtocolError(
+                    f"subchannel closed with {len(missing)} chunks missing "
+                    f"(first missing: {missing[:5]})"
+                )
+            )
 
 
 # ---- helpers ----
@@ -1123,6 +1245,7 @@ def _print_qr(text):
     backend. Convenient for handing the code off to a phone camera.
     """
     import qrcode
+
     qr = qrcode.QRCode(border=1)
     qr.add_data(text)
     qr.make(fit=True)

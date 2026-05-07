@@ -16,8 +16,7 @@ class Send:
     _side = attrib(validator=instance_of(str))
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         self._queue = []
@@ -56,7 +55,7 @@ class Send:
     @m.output()
     def drain(self, key):
         del key
-        for (phase, plaintext) in self._queue:
+        for phase, plaintext in self._queue:
             self._encrypt_and_send(phase, plaintext)
         self._queue[:] = []
 
@@ -73,6 +72,5 @@ class Send:
         self._M.add_message(phase, encrypted)
 
     S0_no_key.upon(send, enter=S0_no_key, outputs=[queue])
-    S0_no_key.upon(
-        got_verified_key, enter=S1_verified_key, outputs=[record_key, drain])
+    S0_no_key.upon(got_verified_key, enter=S1_verified_key, outputs=[record_key, drain])
     S1_verified_key.upon(send, enter=S1_verified_key, outputs=[deliver])

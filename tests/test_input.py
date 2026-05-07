@@ -8,13 +8,13 @@ so completion is purely local and synchronous.
 State machine:
     S0_idle ── start ──▶ S1_typing_words ── choose_words ──▶ S2_done
 """
+
 import pytest
 from automat import NoTransition
 from zope.interface import implementer
 
 from takeit import _interfaces
-from takeit._input import Input, Helper
-from takeit._wordlist import PGPWordList
+from takeit._input import Helper, Input
 from takeit.errors import AlreadyChoseWordsError
 
 
@@ -31,8 +31,12 @@ class FakeCode:
 class FakeTiming:
     def add(self, *a, **kw):
         class _Ctx:
-            def __enter__(self_): return self_
-            def __exit__(self_, *a): return False
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
         return _Ctx()
 
 
@@ -108,8 +112,9 @@ def test_last_word_completion_omits_trailing_hyphen():
     completions = inp.get_word_completions("adviser-adrift-ad")
     assert "adviser-adrift-adviser" in completions
     # No trailing hyphen on the last word.
-    assert not any(s.endswith("-") for s in completions
-                   if s.startswith("adviser-adrift-ad"))
+    assert not any(
+        s.endswith("-") for s in completions if s.startswith("adviser-adrift-ad")
+    )
 
 
 def test_expected_code_length_is_configurable():
@@ -137,6 +142,7 @@ def test_choose_words_validates_format():
     """A code with whitespace or no hyphen must be rejected with KeyFormatError
     rather than silently submitted."""
     from takeit.errors import KeyFormatError
+
     inp, _ = _wired_input()
     inp.start()
     with pytest.raises(KeyFormatError):
@@ -172,6 +178,7 @@ def test_helper_enforces_main_thread():
     The helper is a thread-affine wrapper so that the readline thread can't
     accidentally re-enter the reactor's state machines."""
     import threading
+
     inp, _ = _wired_input()
     helper = inp.start()
     errors = []

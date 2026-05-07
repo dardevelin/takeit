@@ -15,12 +15,17 @@ from ._mailbox import Mailbox
 from ._order import Order
 from ._receive import Receive
 from ._send import Send
-from ._status import WormholeStatus, AllegedSharedKey, ConfirmedKey, Closed
+from ._status import AllegedSharedKey, Closed, ConfirmedKey, WormholeStatus
 from ._tag import derive_tag
 from ._terminator import Terminator
 from ._wordlist import PGPWordList
-from .errors import (LonelyError, OnlyOneCodeError, WelcomeError,
-                     WrongPasswordError, _UnknownPhaseError)
+from .errors import (
+    LonelyError,
+    OnlyOneCodeError,
+    WelcomeError,
+    WrongPasswordError,
+    _UnknownPhaseError,
+)
 from .util import bytes_to_dict, provides
 
 
@@ -54,8 +59,7 @@ class Boss:
     _on_status_update = attrib(default=None)
 
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         # Initialize bookkeeping state *first* so that workers built next
@@ -128,12 +132,14 @@ class Boss:
     def start(self):
         self._RC.start()
 
-    def _print_trace(self, old_state, input, new_state, client_name, machine,
-                     file):  # pragma: no cover
+    def _print_trace(
+        self, old_state, input, new_state, client_name, machine, file
+    ):  # pragma: no cover
         if new_state:
             print(
                 f"{client_name}.{machine}[{old_state}].{input} -> [{new_state}]",
-                file=file)
+                file=file,
+            )
         else:
             # IRendezvous emits message events as if they were state
             # transitions, except that old_state and new_state are empty.
@@ -161,13 +167,17 @@ class Boss:
             "T": self._T,
         }
         for machine in which.split():
+
             def tracer(old_state, input, new_state, machine=machine):
                 self._print_trace(
-                    old_state, input, new_state,
+                    old_state,
+                    input,
+                    new_state,
                     client_name=client_name,
                     machine=machine,
                     file=file,
                 )
+
             names[machine].set_trace(tracer)
             if machine == "I":
                 self._I.set_debug(tracer)
@@ -194,9 +204,14 @@ class Boss:
         self._did_start_code = True
         self._C.set_code(code)
 
-    def dilate(self, transit_relay_location=None, no_listen=False,
-               on_status_update=None, ping_interval=None,
-               expected_subprotocols=None):
+    def dilate(
+        self,
+        transit_relay_location=None,
+        no_listen=False,
+        on_status_update=None,
+        ping_interval=None,
+        expected_subprotocols=None,
+    ):
         return self._D.dilate(
             transit_relay_location,
             no_listen=no_listen,
@@ -251,12 +266,12 @@ class Boss:
     def got_message(self, phase, plaintext):
         assert isinstance(phase, str), type(phase)
         assert isinstance(plaintext, bytes), type(plaintext)
-        d_mo = re.search(r'^dilate-(\d+)$', phase)
+        d_mo = re.search(r"^dilate-(\d+)$", phase)
         if phase == "version":
             self._got_version(plaintext)
         elif d_mo:
             self._got_dilate(int(d_mo.group(1)), plaintext)
-        elif re.search(r'^\d+$', phase):
+        elif re.search(r"^\d+$", phase):
             self._got_phase(int(phase), plaintext)
         else:
             # Ignore unrecognized phases for forward-compatibility, but log
@@ -419,30 +434,37 @@ class Boss:
     S0_empty.upon(send, enter=S0_empty, outputs=[S_send])
     S0_empty.upon(rx_unwelcome, enter=S3_closing, outputs=[close_unwelcome])
     S0_empty.upon(got_code, enter=S1_lonely, outputs=[do_got_code])
-    S0_empty.upon(error, enter=S4_closed,
-                  outputs=[W_close_with_error, send_status_closed])
+    S0_empty.upon(
+        error, enter=S4_closed, outputs=[W_close_with_error, send_status_closed]
+    )
 
     S1_lonely.upon(rx_unwelcome, enter=S3_closing, outputs=[close_unwelcome])
     S1_lonely.upon(happy, enter=S2_happy, outputs=[])
     S1_lonely.upon(scared, enter=S3_closing, outputs=[close_scared])
     S1_lonely.upon(close, enter=S3_closing, outputs=[close_lonely])
     S1_lonely.upon(send, enter=S1_lonely, outputs=[S_send])
-    S1_lonely.upon(got_key, enter=S1_lonely,
-                   outputs=[W_got_key, D_got_key, send_status_peer_key])
-    S1_lonely.upon(error, enter=S4_closed,
-                   outputs=[W_close_with_error, send_status_closed])
+    S1_lonely.upon(
+        got_key, enter=S1_lonely, outputs=[W_got_key, D_got_key, send_status_peer_key]
+    )
+    S1_lonely.upon(
+        error, enter=S4_closed, outputs=[W_close_with_error, send_status_closed]
+    )
 
     S2_happy.upon(rx_unwelcome, enter=S3_closing, outputs=[close_unwelcome])
     S2_happy.upon(got_verifier, enter=S2_happy, outputs=[W_got_verifier])
     S2_happy.upon(_got_phase, enter=S2_happy, outputs=[W_received])
-    S2_happy.upon(_got_version, enter=S2_happy,
-                  outputs=[process_version, send_status_confirmed_key])
+    S2_happy.upon(
+        _got_version,
+        enter=S2_happy,
+        outputs=[process_version, send_status_confirmed_key],
+    )
     S2_happy.upon(_got_dilate, enter=S2_happy, outputs=[D_received_dilate])
     S2_happy.upon(scared, enter=S3_closing, outputs=[close_scared])
     S2_happy.upon(close, enter=S3_closing, outputs=[close_happy])
     S2_happy.upon(send, enter=S2_happy, outputs=[S_send])
-    S2_happy.upon(error, enter=S4_closed,
-                  outputs=[W_close_with_error, send_status_closed])
+    S2_happy.upon(
+        error, enter=S4_closed, outputs=[W_close_with_error, send_status_closed]
+    )
 
     S3_closing.upon(rx_unwelcome, enter=S3_closing, outputs=[])
     S3_closing.upon(got_verifier, enter=S3_closing, outputs=[])
@@ -453,10 +475,10 @@ class Boss:
     S3_closing.upon(scared, enter=S3_closing, outputs=[])
     S3_closing.upon(close, enter=S3_closing, outputs=[])
     S3_closing.upon(send, enter=S3_closing, outputs=[])
-    S3_closing.upon(closed, enter=S4_closed,
-                    outputs=[W_closed, send_status_closed])
-    S3_closing.upon(error, enter=S4_closed,
-                    outputs=[W_close_with_error, send_status_closed])
+    S3_closing.upon(closed, enter=S4_closed, outputs=[W_closed, send_status_closed])
+    S3_closing.upon(
+        error, enter=S4_closed, outputs=[W_close_with_error, send_status_closed]
+    )
 
     S4_closed.upon(rx_unwelcome, enter=S4_closed, outputs=[])
     S4_closed.upon(got_verifier, enter=S4_closed, outputs=[])

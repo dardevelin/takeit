@@ -48,7 +48,8 @@ class DebugTiming:
                     start=e._start,
                     stop=e._stop,
                     details=e._details,
-                ) for e in self._events
+                )
+                for e in self._events
             ]
             json.dump(data, f, indent=1)
             f.write("\n")

@@ -15,8 +15,7 @@ class Order:
     _side = attrib(validator=instance_of(str))
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         self._key = None
@@ -67,7 +66,7 @@ class Order:
     def drain(self, side, phase, body):
         del phase
         del body
-        for (side, phase, body) in self._queue:
+        for side, phase, body in self._queue:
             self._deliver(side, phase, body)
         self._queue[:] = []
 

@@ -38,8 +38,7 @@ class Input:
     # the user just won't get a trailing hyphen on the wrong word.
     _expected_code_length = attrib(default=3)
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         self._wordlist = PGPWordList()
@@ -92,7 +91,8 @@ class Input:
     @m.output()
     def do_word_completions(self, prefix):
         return self._wordlist.get_completions(
-            prefix, num_words=self._expected_code_length)
+            prefix, num_words=self._expected_code_length
+        )
 
     @m.output()
     def do_finish(self, code):
@@ -106,8 +106,7 @@ class Input:
     def raise_already_chose_words_choose(self, code):
         raise AlreadyChoseWordsError()
 
-    S0_idle.upon(
-        start, enter=S1_typing_words, outputs=[do_start], collector=_first)
+    S0_idle.upon(start, enter=S1_typing_words, outputs=[do_start], collector=_first)
 
     S1_typing_words.upon(
         get_word_completions,

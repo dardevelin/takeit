@@ -15,6 +15,7 @@ satisfy the same contract. The FakeRendezvous test double is verified
 here to act as a credible reference; production implementations should
 pass these same tests (parametrized by fixture).
 """
+
 import pytest
 from zope.interface import implementer
 
@@ -69,6 +70,7 @@ def rendezvous_factory():
     Production implementations should provide a fixture with the same
     signature, swapping FakeRendezvous for their own constructor.
     """
+
     def factory(side="aaaa"):
         rv = FakeRendezvous(side)
         boss = _BossSpy()
@@ -76,6 +78,7 @@ def rendezvous_factory():
         term = _TerminatorSpy()
         rv.wire(boss, mailbox, term)
         return rv, boss, mailbox, term
+
     return factory
 
 
@@ -182,8 +185,7 @@ def test_paired_sides_with_different_tags_do_not_cross():
 
     a.tx_add("pake", b"hello")
     # b is on a different tag — must not see this
-    assert not any(
-        ev[0] == "rx_message" and ev[1] == "aaaa" for ev in mailbox_b.events)
+    assert not any(ev[0] == "rx_message" and ev[1] == "aaaa" for ev in mailbox_b.events)
 
 
 # --- disconnection ---

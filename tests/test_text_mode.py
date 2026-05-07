@@ -5,11 +5,11 @@ CLI shape: `--text` is mutually exclusive with the path positional;
 the offer carries kind="text" with the text inline; the receiver
 prints to stdout, no file/sidecar artifacts.
 """
+
 from click.testing import CliRunner
 
 from takeit.cli import _protocol as P
 from takeit.cli.cli import cmd_send
-
 
 # --- CLI argument validation (no network) ---
 
@@ -25,7 +25,8 @@ def test_text_flag_with_path_is_usage_error():
     # such option" or "path doesn't exist" — those would mean the
     # check isn't being run.
     assert "mutually exclusive" in result.output, (
-        f"expected mutual-exclusion error, got: {result.output!r}")
+        f"expected mutual-exclusion error, got: {result.output!r}"
+    )
 
 
 def test_no_text_no_path_is_error():
@@ -63,6 +64,7 @@ def test_receiver_text_branch_prints_and_writes_no_file(tmp_path, capsys):
     # same logic by hand: write the text to stdout via click.echo (the
     # CLI uses click.echo too), then inspect the output_dir.
     import click
+
     click.echo(parsed["text"])
     # Nothing under output_dir.
     output_dir = tmp_path / "downloads"

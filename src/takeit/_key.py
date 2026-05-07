@@ -10,8 +10,15 @@ from spake2 import SPAKE2_Symmetric
 from zope.interface import implementer
 
 from . import _interfaces
-from .util import (bytes_to_dict, bytes_to_hexstr, dict_to_bytes,
-                   hexstr_to_bytes, to_bytes, HKDF, provides)
+from .util import (
+    HKDF,
+    bytes_to_dict,
+    bytes_to_hexstr,
+    dict_to_bytes,
+    hexstr_to_bytes,
+    provides,
+    to_bytes,
+)
 
 CryptoError
 __all__ = ["derive_key", "derive_phase_key", "CryptoError", "Key"]
@@ -32,8 +39,9 @@ def derive_phase_key(key, side, phase):
     assert isinstance(phase, str), type(phase)
     side_bytes = side.encode("ascii")
     phase_bytes = phase.encode("ascii")
-    purpose = (b"wormhole:phase:" + sha256(side_bytes).digest() +
-               sha256(phase_bytes).digest())
+    purpose = (
+        b"wormhole:phase:" + sha256(side_bytes).digest() + sha256(phase_bytes).digest()
+    )
     return derive_key(key, purpose)
 
 
@@ -68,12 +76,10 @@ class Key:
     _side = attrib(validator=instance_of(str))
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
-        self._SK = _SortedKey(self._appid, self._versions, self._side,
-                              self._timing)
+        self._SK = _SortedKey(self._appid, self._versions, self._side, self._timing)
         self._debug_pake_stashed = False  # for tests
 
     def wire(self, boss, mailbox, receive):
@@ -134,8 +140,7 @@ class _SortedKey:
     _side = attrib(validator=instance_of(str))
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def wire(self, boss, mailbox, receive):
         self._B = _interfaces.IBoss(boss)
@@ -184,7 +189,8 @@ class _SortedKey:
     def build_pake(self, code):
         with self._timing.add("pake1", waiting="crypto"):
             self._sp = SPAKE2_Symmetric(
-                to_bytes(code), idSymmetric=to_bytes(self._appid))
+                to_bytes(code), idSymmetric=to_bytes(self._appid)
+            )
             msg1 = self._sp.start()
         body = dict_to_bytes({"pake_v1": bytes_to_hexstr(msg1)})
         self._M.add_message("pake", body)

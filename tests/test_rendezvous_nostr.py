@@ -6,19 +6,20 @@ async calls in the right order. They do NOT exercise a real Nostr relay —
 that is the responsibility of the integration tests further down (skipped
 unless a real relay is configured via TAKEIT_TEST_RELAY env var).
 """
+
 import asyncio
 import base64
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-from twisted.internet import defer
-from twisted.internet.task import Clock
 from zope.interface import implementer
 
 from takeit import _interfaces
 from takeit._rendezvous_nostr import (
-    NostrRendezvous, TAKEIT_KIND, DEFAULT_POW_DIFFICULTY,
+    DEFAULT_POW_DIFFICULTY,
+    TAKEIT_KIND,
+    NostrRendezvous,
 )
 
 
@@ -29,8 +30,11 @@ class _Boss:
         self.errors = []
         self._side = "sssssssss"
 
-    def rx_welcome(self, w): self.welcomes.append(w)
-    def error(self, e): self.errors.append(e)
+    def rx_welcome(self, w):
+        self.welcomes.append(w)
+
+    def error(self, e):
+        self.errors.append(e)
 
 
 @implementer(_interfaces.IMailbox)
@@ -38,11 +42,17 @@ class _Mailbox:
     def __init__(self):
         self.events = []
 
-    def connected(self): self.events.append(("connected",))
-    def lost(self): self.events.append(("lost",))
+    def connected(self):
+        self.events.append(("connected",))
+
+    def lost(self):
+        self.events.append(("lost",))
+
     def rx_message(self, side, phase, body):
         self.events.append(("rx_message", side, phase, body))
-    def rx_closed(self): self.events.append(("rx_closed",))
+
+    def rx_closed(self):
+        self.events.append(("rx_closed",))
 
 
 @implementer(_interfaces.ITerminator)
@@ -50,7 +60,8 @@ class _Terminator:
     def __init__(self):
         self.stopped = False
 
-    def stoppedRC(self): self.stopped = True
+    def stoppedRC(self):
+        self.stopped = True
 
 
 def _wired(side="sssssssss", relays=("wss://example.invalid",)):
@@ -137,10 +148,10 @@ def mock_client(monkeypatch):
         def __call__(self, signer):
             return inst
 
-    monkeypatch.setattr(
-        "takeit._rendezvous_nostr.NostrRendezvous", NostrRendezvous)
+    monkeypatch.setattr("takeit._rendezvous_nostr.NostrRendezvous", NostrRendezvous)
     # Patch the deferred import inside _async_start.
     import nostr_sdk
+
     monkeypatch.setattr(nostr_sdk, "Client", _ClientFactory())
     return inst
 
@@ -172,9 +183,9 @@ async def test_subscribe_uses_kind_and_t_tag_filter(mock_client):
     # The filter should be JSON-serializable to verify shape.
     f = filters[0]
     serialized = f.as_json()
-    assert "21420" in serialized      # kind
+    assert "21420" in serialized  # kind
     assert "the-tag-here-here" in serialized  # tag value
-    assert '"#t"' in serialized        # filter on `t` tag
+    assert '"#t"' in serialized  # filter on `t` tag
 
 
 @pytest.mark.asyncio
@@ -188,9 +199,9 @@ async def test_publish_includes_t_s_p_tags_and_content(mock_client):
     builder = mock_client.published_builders[0]
     # Build the event so we can inspect the tags structurally.
     from nostr_sdk import Keys
+
     event = builder.sign_with_keys(Keys.generate())
-    tag_kvs = [t.as_vec()[:2] for t in event.tags().to_vec()
-               if len(t.as_vec()) >= 2]
+    tag_kvs = [t.as_vec()[:2] for t in event.tags().to_vec() if len(t.as_vec()) >= 2]
     assert ["t", "tag123"] in tag_kvs
     assert ["s", "myhexside"] in tag_kvs
     assert ["p", "pake"] in tag_kvs
@@ -224,15 +235,18 @@ async def test_stop_shuts_down_client_and_emits_lost(mock_client):
 
 def _build_event(side, phase, body, our_signer_keys=None):
     """Build a real Nostr Event object for inbound-delivery tests."""
-    from nostr_sdk import EventBuilder, Kind, Tag, Keys
+    from nostr_sdk import EventBuilder, Keys, Kind, Tag
+
     keys = our_signer_keys or Keys.generate()
     builder = EventBuilder(
         Kind(TAKEIT_KIND), base64.b64encode(body).decode("ascii")
-    ).tags([
-        Tag.parse(["t", "tagX"]),
-        Tag.parse(["s", side]),
-        Tag.parse(["p", phase]),
-    ])
+    ).tags(
+        [
+            Tag.parse(["t", "tagX"]),
+            Tag.parse(["s", side]),
+            Tag.parse(["p", phase]),
+        ]
+    )
     return builder.sign_with_keys(keys)
 
 
@@ -246,8 +260,16 @@ def test_deliver_inbound_passes_through_to_mailbox():
 def test_deliver_inbound_accepts_known_phases():
     """All wormhole control-channel phase strings are accepted."""
     rv, _, mailbox, _ = _wired()
-    for phase in ("pake", "version", "0", "42", "1234567890",
-                  "dilate-0", "dilate-3", "dilate-9999"):
+    for phase in (
+        "pake",
+        "version",
+        "0",
+        "42",
+        "1234567890",
+        "dilate-0",
+        "dilate-3",
+        "dilate-9999",
+    ):
         event = _build_event("their-side", phase, b"x")
         rv._deliver_inbound(event)
     assert sum(1 for e in mailbox.events if e[0] == "rx_message") == 8
@@ -258,9 +280,20 @@ def test_deliver_inbound_drops_invalid_phases():
     is the defense-in-depth layer for the Mailbox redrain DoS."""
     rv, _, mailbox, _ = _wired()
     # All invalid: not in {pake, version}, not numeric, not dilate-N.
-    for bad_phase in ("../etc/passwd", "abcde", "PAKE", "Pake",
-                      "pake-version", "1.0", "0x123", "phase " * 100,
-                      "p" * 1000, "dilate-", "dilate-x", "X" * 100):
+    for bad_phase in (
+        "../etc/passwd",
+        "abcde",
+        "PAKE",
+        "Pake",
+        "pake-version",
+        "1.0",
+        "0x123",
+        "phase " * 100,
+        "p" * 1000,
+        "dilate-",
+        "dilate-x",
+        "X" * 100,
+    ):
         event = _build_event("their-side", bad_phase, b"x")
         rv._deliver_inbound(event)
     # No rx_message events delivered for any of those invalid phases.
@@ -270,23 +303,34 @@ def test_deliver_inbound_drops_invalid_phases():
 def test_is_valid_phase_unit():
     """Pin the regex shape directly, not just through the event flow."""
     from takeit._rendezvous_nostr import _is_valid_phase
-    for ok in ("pake", "version", "0", "1234567890",
-               "dilate-0", "dilate-9999"):
+
+    for ok in ("pake", "version", "0", "1234567890", "dilate-0", "dilate-9999"):
         assert _is_valid_phase(ok), f"{ok!r} should be valid"
-    for bad in ("", "PAKE", "pake ", " pake", "pake\n", "abc",
-                "12345678901", "dilate-", "dilate-12345678901",
-                "dilate", "dilate-x", "../bad"):
+    for bad in (
+        "",
+        "PAKE",
+        "pake ",
+        " pake",
+        "pake\n",
+        "abc",
+        "12345678901",
+        "dilate-",
+        "dilate-12345678901",
+        "dilate",
+        "dilate-x",
+        "../bad",
+    ):
         assert not _is_valid_phase(bad), f"{bad!r} should be invalid"
 
 
 def test_deliver_inbound_drops_event_missing_tags():
     """Defense in depth: an event without our s/p tags is logged-and-ignored
     rather than raising."""
-    from nostr_sdk import EventBuilder, Kind, Keys
+    from nostr_sdk import EventBuilder, Keys, Kind
+
     rv, _, mailbox, _ = _wired()
     # No s/p tags
-    event = (EventBuilder(Kind(TAKEIT_KIND), "ZGF0YQ==")
-             .sign_with_keys(Keys.generate()))
+    event = EventBuilder(Kind(TAKEIT_KIND), "ZGF0YQ==").sign_with_keys(Keys.generate())
     rv._deliver_inbound(event)
     assert mailbox.events == []  # nothing delivered
 
@@ -319,6 +363,7 @@ async def test_integration_two_nostr_rendezvous_meet():  # pragma: no cover
     received = [e for e in mb_b.events if e[0] == "rx_message"]
     assert any(
         ev[1] == "sideAAAA" and ev[2] == "hello" and ev[3] == b"from-a"
-        for ev in received), f"expected rx_message in {mb_b.events}"
+        for ev in received
+    ), f"expected rx_message in {mb_b.events}"
     await rv_a._async_stop()
     await rv_b._async_stop()

@@ -10,6 +10,7 @@ becomes tiny:
     S_stopping_RC ──stoppedRC──▶ S_stopping_D  (with stop_dilator)
     S_stopping_D ──stoppedD──▶ S_stopped  (with B_closed)
 """
+
 from zope.interface import implementer
 
 from takeit import _interfaces
@@ -100,5 +101,6 @@ def test_mood_required_on_close():
     """close() must take a mood — no mood-less terminations."""
     t, _, _, _, _ = _wired_terminator()
     import pytest
+
     with pytest.raises(TypeError):
         t.close()  # missing mood

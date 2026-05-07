@@ -4,9 +4,10 @@
 import json
 import unicodedata
 from binascii import hexlify, unhexlify
-from cryptography.hazmat.primitives.kdf import hkdf
+
+from attr import attrib, attrs
 from cryptography.hazmat.primitives import hashes
-from attr import attrs, attrib
+from cryptography.hazmat.primitives.kdf import hkdf
 
 
 def HKDF(skm, outlen, salt=None, CTXinfo=b""):

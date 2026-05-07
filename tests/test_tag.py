@@ -6,13 +6,13 @@ operator who sees `#t = <tag>` events should not be able to recover the code
 from the tag, and two takeit clients sharing the same code must independently
 derive the same tag without coordinating.
 """
+
 import re
 import string
 
 import pytest
 
-from takeit._tag import derive_tag, TAG_LENGTH, TAG_ALPHABET
-
+from takeit._tag import TAG_ALPHABET, TAG_LENGTH, derive_tag
 
 VALID_CODE = "purple-sausages-mocha"
 
@@ -56,6 +56,7 @@ def test_distinctness_across_many_codes():
     wrong reason.
     """
     from takeit._wordlist import PGPWordList
+
     wl = PGPWordList()
     codes = set()
     while len(codes) < 1000:
@@ -98,14 +99,18 @@ def test_changing_salt_changes_output():
     if someone changes the salt without thinking through the migration.
     """
     from takeit._tag import _hkdf_extract_and_expand
-    a = _hkdf_extract_and_expand(VALID_CODE.encode(), b"takeit/nostr/v1", b"rendezvous-tag")
-    b = _hkdf_extract_and_expand(VALID_CODE.encode(), b"takeit/nostr/v2", b"rendezvous-tag")
+
+    code = VALID_CODE.encode()
+    a = _hkdf_extract_and_expand(code, b"takeit/nostr/v1", b"rendezvous-tag")
+    b = _hkdf_extract_and_expand(code, b"takeit/nostr/v2", b"rendezvous-tag")
     assert a != b
 
 
 def test_changing_info_changes_output():
     """info is the per-purpose label inside the same protocol version."""
     from takeit._tag import _hkdf_extract_and_expand
-    a = _hkdf_extract_and_expand(VALID_CODE.encode(), b"takeit/nostr/v1", b"rendezvous-tag")
-    b = _hkdf_extract_and_expand(VALID_CODE.encode(), b"takeit/nostr/v1", b"some-other-purpose")
+
+    code = VALID_CODE.encode()
+    a = _hkdf_extract_and_expand(code, b"takeit/nostr/v1", b"rendezvous-tag")
+    b = _hkdf_extract_and_expand(code, b"takeit/nostr/v1", b"some-other-purpose")
     assert a != b

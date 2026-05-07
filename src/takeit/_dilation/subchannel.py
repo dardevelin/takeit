@@ -5,12 +5,16 @@ from attr import attrs, attrib
 from attr.validators import instance_of
 from zope.interface import implementer
 from twisted.internet.defer import inlineCallbacks
-from twisted.internet.interfaces import (ITransport, IProducer, IConsumer,
-                                         IAddress, IListeningPort,
-                                         IHalfCloseableProtocol,
-                                         IStreamClientEndpoint,
-                                         IStreamServerEndpoint,
-                                         )
+from twisted.internet.interfaces import (
+    ITransport,
+    IProducer,
+    IConsumer,
+    IAddress,
+    IListeningPort,
+    IHalfCloseableProtocol,
+    IStreamClientEndpoint,
+    IStreamServerEndpoint,
+)
 from twisted.internet.error import ConnectionDone
 from automat import MethodicalMachine
 from .._interfaces import ISubChannel, IDilationManager
@@ -74,6 +78,7 @@ class SubchannelAddress:
     Although each subchannel does have an 'id', this is a concept
     private to this implementation, and not exposed here on purpose.
     """
+
     subprotocol = attrib(validator=instance_of(str))
 
 
@@ -89,8 +94,7 @@ class SubChannel:
     _peer_addr = attrib(validator=instance_of(SubchannelAddress))
 
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace", lambda self,
-                        f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         # self._mailbox = None
@@ -199,8 +203,7 @@ class SubChannel:
 
     @m.output()
     def error_closed_close(self):
-        raise AlreadyClosedError(
-            "loseConnection not allowed on closed subchannel")
+        raise AlreadyClosedError("loseConnection not allowed on closed subchannel")
 
     # stuff that arrives before we have a protocol connected
     unconnected.upon(remote_data, enter=unconnected, outputs=[queue_remote_data])
@@ -213,19 +216,32 @@ class SubChannel:
     # remote closes first
     open_half.upon(remote_close, enter=read_closed, outputs=[signal_readConnectionLost])
     read_closed.upon(local_data, enter=read_closed, outputs=[send_data])
-    read_closed.upon(local_close, enter=closed, outputs=[send_close,
-                                                         close_subchannel,
-                                                         # TODO: eventual-signal this?
-                                                         signal_writeConnectionLost,
-                                                         ])
+    read_closed.upon(
+        local_close,
+        enter=closed,
+        outputs=[
+            send_close,
+            close_subchannel,
+            # TODO: eventual-signal this?
+            signal_writeConnectionLost,
+        ],
+    )
     # local closes first
-    open_half.upon(local_close, enter=write_closed, outputs=[signal_writeConnectionLost,
-                                                             send_close])
+    open_half.upon(
+        local_close,
+        enter=write_closed,
+        outputs=[signal_writeConnectionLost, send_close],
+    )
     write_closed.upon(local_data, enter=write_closed, outputs=[error_closed_write])
     write_closed.upon(remote_data, enter=write_closed, outputs=[signal_dataReceived])
-    write_closed.upon(remote_close, enter=closed, outputs=[close_subchannel,
-                                                           signal_readConnectionLost,
-                                                           ])
+    write_closed.upon(
+        remote_close,
+        enter=closed,
+        outputs=[
+            close_subchannel,
+            signal_readConnectionLost,
+        ],
+    )
     # error cases
     write_closed.upon(local_close, enter=write_closed, outputs=[error_closed_close])
 
@@ -233,13 +249,16 @@ class SubChannel:
     unconnected.upon(connect_protocol_full, enter=open_full, outputs=[])
     open_full.upon(remote_data, enter=open_full, outputs=[signal_dataReceived])
     open_full.upon(local_data, enter=open_full, outputs=[send_data])
-    open_full.upon(remote_close, enter=closed, outputs=[send_close,
-                                                        close_subchannel,
-                                                        signal_connectionLost])
+    open_full.upon(
+        remote_close,
+        enter=closed,
+        outputs=[send_close, close_subchannel, signal_connectionLost],
+    )
     open_full.upon(local_close, enter=closing, outputs=[send_close])
     closing.upon(remote_data, enter=closing, outputs=[signal_dataReceived])
-    closing.upon(remote_close, enter=closed, outputs=[close_subchannel,
-                                                      signal_connectionLost])
+    closing.upon(
+        remote_close, enter=closed, outputs=[close_subchannel, signal_connectionLost]
+    )
     # error cases
     # we won't ever see an OPEN, since L4 will log+ignore those for us
     closing.upon(local_data, enter=closing, outputs=[error_closed_write])
@@ -328,9 +347,7 @@ class SubchannelConnectorEndpoint:
     def __attrs_post_init__(self):
         self._connection_deferreds = deque()
         if not self._subprotocol:
-            raise ValueError(
-                "subprotocol must be a non-empty str"
-            )
+            raise ValueError("subprotocol must be a non-empty str")
 
     @inlineCallbacks
     def connect(self, protocolFactory):
@@ -387,9 +404,12 @@ class SubchannelDemultiplex:
     `expected_subprotocols` is a collection of str, where any OPEN not
     in the list produces an error.
     """
+
     def __init__(self, expected_subprotocols=None):
         self._factories = dict()  # name -> IProtocolFactory
-        self._pending_opens = defaultdict(deque)  # name -> deque[tuple[transport, address]]
+        self._pending_opens = defaultdict(
+            deque
+        )  # name -> deque[tuple[transport, address]]
         self._expected = expected_subprotocols
 
     # from manager (actually Inbound)
@@ -413,9 +433,7 @@ class SubchannelDemultiplex:
 
     def register(self, subprotocol_name, factory):
         if subprotocol_name in self._factories:
-            raise ValueError(
-                f'Already listening for subprotocol "{subprotocol_name}"'
-            )
+            raise ValueError(f'Already listening for subprotocol "{subprotocol_name}"')
         self._factories[subprotocol_name] = factory
 
         # deliver any pending OPENs that have accumulated for this

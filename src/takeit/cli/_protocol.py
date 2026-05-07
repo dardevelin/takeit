@@ -38,13 +38,13 @@ Subchannel framing (file/directory; bulk):
        "all frames sent."
     4. Receiver finalizes when ``chunks_have ∪ received == {0..N-1}``.
 """
+
 import base64
 import hashlib
 import json
 import os
 import struct
 import unicodedata
-
 
 # Subchannel name for the bulk-transfer protocol. Versioned in the name so
 # future incompatible changes can coexist.
@@ -63,8 +63,8 @@ TRANSFER_ID_BYTES = 16
 # entries in `_chunk_hashes_bytes` and OOM before the user even sees the
 # offer prompt. These limits are loose — 1 TiB / 1M chunks covers any
 # realistic file — but bounded.
-MAX_OFFER_SIZE = 1 << 40         # 1 TiB
-MAX_CHUNK_COUNT = 1 << 20        # ~1M chunks (with 1 MiB chunks → 1 TiB)
+MAX_OFFER_SIZE = 1 << 40  # 1 TiB
+MAX_CHUNK_COUNT = 1 << 20  # ~1M chunks (with 1 MiB chunks → 1 TiB)
 
 # Filename length cap. POSIX `NAME_MAX` is 255 on most filesystems; some
 # (HFS+, APFS) accept more but limit by codepoints not bytes. We enforce
@@ -93,13 +93,32 @@ KNOWN_KINDS = frozenset({KIND_FILE, KIND_DIRECTORY, KIND_TEXT})
 # refer to devices regardless of extension — `CON.txt` opens the console.
 # We reject them on every platform so a takeit transfer can be moved to
 # Windows without breakage.
-_WINDOWS_RESERVED = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    "COM1", "COM2", "COM3", "COM4", "COM5",
-    "COM6", "COM7", "COM8", "COM9",
-    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5",
-    "LPT6", "LPT7", "LPT8", "LPT9",
-})
+_WINDOWS_RESERVED = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
 
 
 class ProtocolError(ValueError):
@@ -123,8 +142,7 @@ def _validate_filename(fn):
     if not fn:
         raise ValueError("filename must not be empty")
     if len(fn.encode("utf-8")) > MAX_FILENAME_BYTES:
-        raise ValueError(
-            f"filename exceeds {MAX_FILENAME_BYTES} UTF-8 bytes")
+        raise ValueError(f"filename exceeds {MAX_FILENAME_BYTES} UTF-8 bytes")
     # Path-component checks
     if "/" in fn or "\\" in fn:
         raise ValueError(f"unsafe filename: separator in {fn!r}")
@@ -143,26 +161,21 @@ def _validate_filename(fn):
     for c in fn:
         cp = ord(c)
         if cp < 0x20 or cp == 0x7F:
-            raise ValueError(
-                f"unsafe filename: control character {c!r}")
+            raise ValueError(f"unsafe filename: control character {c!r}")
         if 0x202A <= cp <= 0x202E or 0x2066 <= cp <= 0x2069:
-            raise ValueError(
-                f"unsafe filename: Unicode bidi-override U+{cp:04X}")
+            raise ValueError(f"unsafe filename: Unicode bidi-override U+{cp:04X}")
     # Trailing dot or space: Windows silently strips → collision/overwrite.
     if fn.endswith(".") or fn.endswith(" "):
-        raise ValueError(
-            f"unsafe filename: trailing dot or space in {fn!r}")
+        raise ValueError(f"unsafe filename: trailing dot or space in {fn!r}")
     # Windows reserved device stems (CON, COM1, ..., regardless of extension).
     stem = fn.split(".", 1)[0].upper()
     if stem in _WINDOWS_RESERVED:
-        raise ValueError(
-            f"unsafe filename: Windows reserved name {fn!r}")
+        raise ValueError(f"unsafe filename: Windows reserved name {fn!r}")
     # Unicode normalization mismatch — catches RTL override (U+202E) and
     # homoglyph confusables. The sender should send NFC; if the receiver
     # gets non-NFC, refuse rather than guess.
     if unicodedata.normalize("NFC", fn) != fn:
-        raise ValueError(
-            f"unsafe filename: not Unicode-normalized (NFC) {fn!r}")
+        raise ValueError(f"unsafe filename: not Unicode-normalized (NFC) {fn!r}")
 
 
 def hash_file(path):
@@ -213,15 +226,18 @@ def _validate_chunked_offer(size, chunk_size):
     if size < 0:
         raise ValueError(f"negative size: {size}")
     if size > MAX_OFFER_SIZE:
-        raise ValueError(
-            f"offer size {size} exceeds max {MAX_OFFER_SIZE}")
+        raise ValueError(f"offer size {size} exceeds max {MAX_OFFER_SIZE}")
     if chunk_size <= 0:
         raise ValueError(f"non-positive chunk_size: {chunk_size}")
 
 
-def build_offer_file(filename, size, content_hash,
-                     chunk_size=DEFAULT_CHUNK_SIZE,
-                     app_version="takeit/0.0.1"):
+def build_offer_file(
+    filename,
+    size,
+    content_hash,
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    app_version="takeit/0.0.1",
+):
     """Build a `kind="file"` offer.
 
     chunk_hashes are NOT part of the offer (HYP-392); they ride the
@@ -244,10 +260,15 @@ def build_offer_file(filename, size, content_hash,
     }
 
 
-def build_offer_directory(dir_name, size, content_hash,
-                          num_files, num_bytes,
-                          chunk_size=DEFAULT_CHUNK_SIZE,
-                          app_version="takeit/0.0.1"):
+def build_offer_directory(
+    dir_name,
+    size,
+    content_hash,
+    num_files,
+    num_bytes,
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    app_version="takeit/0.0.1",
+):
     """Build a `kind="directory"` offer.
 
     `num_files` and `num_bytes` are advisory totals over the uncompressed
@@ -261,8 +282,7 @@ def build_offer_directory(dir_name, size, content_hash,
         raise ValueError(f"num_files must be a non-negative int: {num_files!r}")
     if not isinstance(num_bytes, int) or num_bytes < 0:
         raise ValueError(f"num_bytes must be a non-negative int: {num_bytes!r}")
-    transfer_id = compute_transfer_id(
-        KIND_DIRECTORY, size, dir_name, content_hash)
+    transfer_id = compute_transfer_id(KIND_DIRECTORY, size, dir_name, content_hash)
     return {
         "offer": {
             "kind": KIND_DIRECTORY,
@@ -284,8 +304,7 @@ def build_offer_text(text, app_version="takeit/0.0.1"):
     if not isinstance(text, str):
         raise ValueError(f"text must be str, got {type(text).__name__}")
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
-        raise ValueError(
-            f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+        raise ValueError(f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
     transfer_id = compute_text_transfer_id(text)
     return {
         "offer": {
@@ -340,15 +359,15 @@ def parse_offer(payload):
         # Reject filename on a directory offer to prevent wire confusion.
         if "filename" in o:
             raise ProtocolError(
-                "directory offer must not carry 'filename'; use 'dir_name'")
+                "directory offer must not carry 'filename'; use 'dir_name'"
+            )
     elif kind == KIND_TEXT:
         if "text" not in o:
             raise ProtocolError("text offer missing 'text'")
         if not isinstance(o["text"], str):
             raise ProtocolError("text must be str")
         if len(o["text"].encode("utf-8")) > MAX_TEXT_BYTES:
-            raise ProtocolError(
-                f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+            raise ProtocolError(f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
     return o
 
 
@@ -363,8 +382,8 @@ def _parse_chunked_offer(o, name_field):
     """
     if "chunk_hashes" in o:
         raise ProtocolError(
-            "offer must not carry 'chunk_hashes' "
-            "(moved to dilation subchannel)")
+            "offer must not carry 'chunk_hashes' (moved to dilation subchannel)"
+        )
     for field in (name_field, "size", "content_hash", "chunk_size"):
         if field not in o:
             raise ProtocolError(f"offer missing {field!r}")
@@ -377,8 +396,7 @@ def _parse_chunked_offer(o, name_field):
     if not isinstance(o["size"], int) or o["size"] < 0:
         raise ProtocolError("size must be a non-negative int")
     if o["size"] > MAX_OFFER_SIZE:
-        raise ProtocolError(
-            f"offer size {o['size']} exceeds max {MAX_OFFER_SIZE}")
+        raise ProtocolError(f"offer size {o['size']} exceeds max {MAX_OFFER_SIZE}")
     if not isinstance(o["chunk_size"], int) or o["chunk_size"] <= 0:
         raise ProtocolError("chunk_size must be a positive int")
     try:
@@ -479,14 +497,13 @@ class FrameDecoder:
         while True:
             if len(self._buf) < _FRAME_HDR.size:
                 return
-            chunk_index, length = _FRAME_HDR.unpack(
-                bytes(self._buf[:_FRAME_HDR.size]))
+            chunk_index, length = _FRAME_HDR.unpack(bytes(self._buf[: _FRAME_HDR.size]))
             if length == 0:
                 raise ProtocolError("zero-length chunk frame is invalid")
             total = _FRAME_HDR.size + length
             if len(self._buf) < total:
                 return
-            chunk = bytes(self._buf[_FRAME_HDR.size:total])
+            chunk = bytes(self._buf[_FRAME_HDR.size : total])
             del self._buf[:total]
             yield (chunk_index, chunk)
 
@@ -508,15 +525,13 @@ def chunk_hashes_for_file(path, chunk_size=DEFAULT_CHUNK_SIZE):
                 break
             size += len(buf)
             h_all.update(buf)
-            chunk_hashes.append(
-                hashlib.blake2b(buf, digest_size=32).digest())
+            chunk_hashes.append(hashlib.blake2b(buf, digest_size=32).digest())
     return size, h_all.digest(), chunk_hashes
 
 
 def verify_chunk(chunk_bytes, expected_hash):
     """True if BLAKE2b-256(chunk_bytes) matches expected_hash exactly."""
-    return hashlib.blake2b(
-        chunk_bytes, digest_size=32).digest() == expected_hash
+    return hashlib.blake2b(chunk_bytes, digest_size=32).digest() == expected_hash
 
 
 # --- subchannel framing (HYP-392) ---
@@ -531,8 +546,7 @@ def encode_length_prefixed(body):
     dilation subchannel. Used for chunk_hashes header (sender→receiver)
     and chunks_have reply (receiver→sender) before chunk frames."""
     if len(body) > MAX_HEADER_BYTES:
-        raise ValueError(
-            f"body length {len(body)} exceeds max {MAX_HEADER_BYTES}")
+        raise ValueError(f"body length {len(body)} exceeds max {MAX_HEADER_BYTES}")
     return _LEN_HDR.pack(len(body)) + body
 
 
@@ -551,18 +565,17 @@ class LengthPrefixedDecoder:
         while True:
             if len(self._buf) < _LEN_HDR.size:
                 return
-            (length,) = _LEN_HDR.unpack(
-                bytes(self._buf[:_LEN_HDR.size]))
+            (length,) = _LEN_HDR.unpack(bytes(self._buf[: _LEN_HDR.size]))
             if length == 0:
                 raise ProtocolError("zero-length subchannel message")
             if length > MAX_HEADER_BYTES:
                 raise ProtocolError(
-                    f"subchannel message length {length} exceeds max "
-                    f"{MAX_HEADER_BYTES}")
+                    f"subchannel message length {length} exceeds max {MAX_HEADER_BYTES}"
+                )
             total = _LEN_HDR.size + length
             if len(self._buf) < total:
                 return
-            body = bytes(self._buf[_LEN_HDR.size:total])
+            body = bytes(self._buf[_LEN_HDR.size : total])
             del self._buf[:total]
             yield body
 
@@ -570,10 +583,12 @@ class LengthPrefixedDecoder:
 def build_subchannel_header(chunk_hashes):
     """Build the sender's subchannel header carrying chunk_hashes.
     Returns the length-prefixed bytes ready to write to the subchannel."""
-    body = json.dumps({
-        "chunk_hashes": [
-            base64.b64encode(h).decode("ascii") for h in chunk_hashes],
-    }, separators=(",", ":")).encode("utf-8")
+    body = json.dumps(
+        {
+            "chunk_hashes": [base64.b64encode(h).decode("ascii") for h in chunk_hashes],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
     return encode_length_prefixed(body)
 
 
@@ -588,8 +603,8 @@ def parse_subchannel_header(payload):
         raise ProtocolError("chunk_hashes must be a list")
     if len(chunk_hashes_b64) > MAX_CHUNK_COUNT:
         raise ProtocolError(
-            f"chunk_hashes count {len(chunk_hashes_b64)} exceeds max "
-            f"{MAX_CHUNK_COUNT}")
+            f"chunk_hashes count {len(chunk_hashes_b64)} exceeds max {MAX_CHUNK_COUNT}"
+        )
     try:
         chunk_hashes = [base64.b64decode(h) for h in chunk_hashes_b64]
     except Exception as e:
@@ -603,9 +618,12 @@ def parse_subchannel_header(payload):
 def build_chunks_have(chunks_have):
     """Build the receiver's subchannel reply listing already-have indices.
     Empty list for fresh transfers; the sender skips those indices."""
-    body = json.dumps({
-        "chunks_have": sorted(chunks_have) if chunks_have else [],
-    }, separators=(",", ":")).encode("utf-8")
+    body = json.dumps(
+        {
+            "chunks_have": sorted(chunks_have) if chunks_have else [],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
     return encode_length_prefixed(body)
 
 
@@ -618,6 +636,5 @@ def parse_chunks_have(payload):
     if not isinstance(chunks_have, list):
         raise ProtocolError("chunks_have must be a list")
     if not all(isinstance(i, int) and i >= 0 for i in chunks_have):
-        raise ProtocolError(
-            "chunks_have must be a list of non-negative ints")
+        raise ProtocolError("chunks_have must be a list of non-negative ints")
     return chunks_have

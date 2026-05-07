@@ -9,6 +9,7 @@ Three branches, all leading to the same terminal state S2_known:
 The S2_known transition fires `B.got_code(code)` and `K.got_code(code)` so
 that downstream state machines (Boss, Key) start their work.
 """
+
 import pytest
 from zope.interface import implementer
 
@@ -52,8 +53,12 @@ class FakeInput:
 class FakeTiming:
     def add(self, *a, **kw):
         class _Ctx:
-            def __enter__(self_): return self_
-            def __exit__(self_, *a): return False
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
         return _Ctx()
 
 
@@ -133,6 +138,7 @@ def test_input_code_then_finished_notifies_boss_and_key():
 def test_finished_input_before_start_is_invalid():
     """The Code state machine should reject finished_input from S0_idle."""
     from automat import NoTransition
+
     c, _, _, _ = _wired_code()
     with pytest.raises(NoTransition):
         c.finished_input("purple-sausages-mocha")
@@ -153,9 +159,11 @@ def test_allocate_code_generates_locally_and_notifies():
 
 def test_allocate_code_uses_caller_provided_wordlist():
     """The wordlist must be respected so a future i18n wordlist works."""
+
     class StubWordlist:
         def choose_words(self, length):
             return "alpha-beta-gamma"
+
     c, boss, _, _ = _wired_code()
     c.allocate_code(3, StubWordlist())
     assert boss.codes == ["alpha-beta-gamma"]
@@ -166,6 +174,7 @@ def test_allocate_code_uses_caller_provided_wordlist():
 
 def test_cannot_set_code_twice():
     from automat import NoTransition
+
     c, _, _, _ = _wired_code()
     c.set_code("purple-sausages-mocha")
     with pytest.raises(NoTransition):
@@ -174,6 +183,7 @@ def test_cannot_set_code_twice():
 
 def test_cannot_mix_paths():
     from automat import NoTransition
+
     c, _, _, _ = _wired_code()
     c.set_code("purple-sausages-mocha")
     with pytest.raises(NoTransition):

@@ -1,6 +1,6 @@
 # Originally from magic-wormhole (MIT, (c) 2015 Brian Warner).
 # Lifted into takeit; see NOTICE for the full list.
-from attrs import frozen, Factory
+from attrs import Factory, frozen
 
 
 @frozen
@@ -50,6 +50,7 @@ class ConnectingPeer:
     """
     We are actively trying to connect to a peer
     """
+
     last_attempt: int  # unix-timestamp
 
 
@@ -59,6 +60,7 @@ class ReconnectingPeer:
     We are actively trying to connect to a peer.
     In contract to `ConnectingPeer`, we've already reached our peer at least once.
     """
+
     last_attempt: int  # unix-timestamp
 
 
@@ -118,7 +120,9 @@ PeerSharedKey = NoKey | AllegedSharedKey | ConfirmedKey
 CodeStatus = NoCode | AllocatedCode | ConsumedCode
 
 # Dilation only
-PeerConnection = NoPeer | ConnectingPeer | ConnectedPeer | ReconnectingPeer | StoppedPeer
+PeerConnection = (
+    NoPeer | ConnectingPeer | ConnectedPeer | ReconnectingPeer | StoppedPeer
+)
 
 
 # NOTE: probably none of the status stuff should ever reveal secret or
@@ -159,6 +163,7 @@ class DilationStatus:
     Represents the current status of a Dilated wormhole
 
     """
+
     # If we are using Dilation (or trying to) it definitely means we
     # have a Wormhole, and thus a WormholeStatus too -- but do we
     # actually want to 'embed' the wormhole status like this?

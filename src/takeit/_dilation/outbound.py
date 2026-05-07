@@ -154,6 +154,7 @@ from .connection import KCM, Ping, Pong, Ack
 #   too much of the Subchannel internals
 #
 
+
 @attrs
 @implementer(IOutbound, IPushProducer)
 class Outbound:
@@ -180,8 +181,9 @@ class Outbound:
 
     def _check_invariants(self):
         assert self._unpaused_producers.isdisjoint(self._paused_producers)
-        assert (self._paused_producers.union(self._unpaused_producers) ==
-                set(self._all_producers))
+        assert self._paused_producers.union(self._unpaused_producers) == set(
+            self._all_producers
+        )
 
     def build_record(self, record_type, *args):
         seqnum = self._next_outbound_seqnum
@@ -216,13 +218,15 @@ class Outbound:
         if sc in self._subchannel_producers:
             raise ValueError(
                 "registering producer %s before previous one (%s) was "
-                "unregistered" % (producer,
-                                  self._subchannel_producers[sc]))
+                "unregistered" % (producer, self._subchannel_producers[sc])
+            )
         # our underlying Connection uses streaming==True, so to make things
         # easier, use an adapter when the Subchannel asks for streaming=False
         if not streaming:
+
             def unregister():
                 self.subchannel_unregisterProducer(sc)
+
             producer = PullToPush(producer, unregister, self._cooperator)
 
         self._subchannel_producers[sc] = producer
@@ -282,11 +286,9 @@ class Outbound:
 
     def handle_ack(self, resp_seqnum):
         # we've received an inbound ack, so retire something
-        while (self._outbound_queue and
-               self._outbound_queue[0].seqnum <= resp_seqnum):
+        while self._outbound_queue and self._outbound_queue[0].seqnum <= resp_seqnum:
             self._outbound_queue.popleft()
-        while (self._queued_unsent and
-               self._queued_unsent[0].seqnum <= resp_seqnum):
+        while self._queued_unsent and self._queued_unsent[0].seqnum <= resp_seqnum:
             self._queued_unsent.popleft()
         # Inbound is responsible for tracking the high watermark and deciding
         # whether to ignore inbound messages or not
@@ -353,8 +355,11 @@ class PullToPush:
             try:
                 self._producer.resumeProducing()
             except Exception:
-                log.err(None, "%s failed, producing will be stopped:" %
-                        (safe_str(self._producer),))
+                log.err(
+                    None,
+                    "%s failed, producing will be stopped:"
+                    % (safe_str(self._producer),),
+                )
                 try:
                     self._unregister()
                     # The consumer should now call stopStreaming() on us,
@@ -362,8 +367,11 @@ class PullToPush:
                 except Exception:
                     # Since the consumer blew up, we may not have had
                     # stopStreaming() called, so we just stop on our own:
-                    log.err(None, "%s failed to unregister producer:" %
-                            (safe_str(self._unregister),))
+                    log.err(
+                        None,
+                        "%s failed to unregister producer:"
+                        % (safe_str(self._unregister),),
+                    )
                     self._finished = True
                     return
             yield None

@@ -24,8 +24,7 @@ class Terminator:
     """
 
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __init__(self):
         self._mood = None
@@ -100,7 +99,8 @@ class Terminator:
     S_running.upon(mailbox_done, enter=S_running_mailbox_done, outputs=[])
 
     S_running_mailbox_done.upon(
-        close, enter=S_stopping_RC, outputs=[ignore_mood_and_RC_stop])
+        close, enter=S_stopping_RC, outputs=[ignore_mood_and_RC_stop]
+    )
 
     S_closing.upon(mailbox_done, enter=S_stopping_RC, outputs=[RC_stop])
 

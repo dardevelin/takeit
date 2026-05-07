@@ -9,6 +9,7 @@ full wormhole + dilation stack:
 The wormhole/dilation layer is unit-tested elsewhere (test_api,
 test_boss, etc.); this file pins the directory-specific glue.
 """
+
 import filecmp
 import io
 import os
@@ -18,7 +19,6 @@ import pytest
 
 from takeit.cli import _protocol as P
 from takeit.cli import _zipstream as Z
-
 
 # --- helpers ---
 
@@ -51,27 +51,35 @@ def test_e2e_directory_transfer_round_trips(tmp_path):
     destination. Final tree matches source byte-for-byte."""
     src = tmp_path / "src"
     src.mkdir()
-    _materialize(src, {
-        "README.md": b"# project\n",
-        "src/main.py": b"print('hi')\n",
-        "src/util.py": b"def f(): return 42\n",
-        "data/big.bin": os.urandom(1_500_000),  # crosses chunk boundary
-    })
+    _materialize(
+        src,
+        {
+            "README.md": b"# project\n",
+            "src/main.py": b"print('hi')\n",
+            "src/util.py": b"def f(): return 42\n",
+            "data/big.bin": os.urandom(1_500_000),  # crosses chunk boundary
+        },
+    )
     chunk_size = 1 << 20
 
     # Sender: build the offer.
     tmp_zip = tmp_path / "send.zip"
     files, num_files, num_bytes = Z.walk_directory(str(src))
     size, content_hash, chunk_hashes = Z.materialize_and_hash(
-        str(src), str(tmp_zip), chunk_size)
+        str(src), str(tmp_zip), chunk_size
+    )
     # chunk_hashes are no longer part of the offer (HYP-392) — they
     # ride the dilation subchannel. We still compute them on the sender
     # side because materialize_and_hash returns them; in real CLI flow
     # they'd be sent via build_subchannel_header.
     offer_msg = P.build_offer_directory(
-        "src", size, content_hash,
-        num_files=num_files, num_bytes=num_bytes,
-        chunk_size=chunk_size)
+        "src",
+        size,
+        content_hash,
+        num_files=num_files,
+        num_bytes=num_bytes,
+        chunk_size=chunk_size,
+    )
 
     # Wire transit: in real CLI the bytes ride dilation chunks; here we
     # just hand the receiver the materialized zip directly.
@@ -104,21 +112,22 @@ def test_e2e_directory_transfer_resume_simulation(tmp_path):
     new offer would advertise (so the receiver could reuse them)."""
     src = tmp_path / "src"
     src.mkdir()
-    _materialize(src, {
-        "a.txt": b"x" * 600_000,
-        "b.txt": b"y" * 600_000,  # together: 1.2 MiB → 2 chunks
-    })
+    _materialize(
+        src,
+        {
+            "a.txt": b"x" * 600_000,
+            "b.txt": b"y" * 600_000,  # together: 1.2 MiB → 2 chunks
+        },
+    )
     chunk_size = 1 << 20
 
     # Sender pass 1.
     zip_a = tmp_path / "a.zip"
-    size_a, hash_a, chunks_a = Z.materialize_and_hash(
-        str(src), str(zip_a), chunk_size)
+    size_a, hash_a, chunks_a = Z.materialize_and_hash(str(src), str(zip_a), chunk_size)
 
     # Sender pass 2 (e.g. after the user re-runs).
     zip_b = tmp_path / "b.zip"
-    size_b, hash_b, chunks_b = Z.materialize_and_hash(
-        str(src), str(zip_b), chunk_size)
+    size_b, hash_b, chunks_b = Z.materialize_and_hash(str(src), str(zip_b), chunk_size)
 
     # Determinism: byte-identical, same hashes.
     assert zip_a.read_bytes() == zip_b.read_bytes()
@@ -133,8 +142,7 @@ def test_e2e_directory_zipslip_rejected(tmp_path):
     verifies (the attacker controls the content)."""
     bad = io.BytesIO()
     with zipfile.ZipFile(bad, "w") as zf:
-        zi = zipfile.ZipInfo(
-            "../escape.txt", date_time=(1980, 1, 1, 0, 0, 0))
+        zi = zipfile.ZipInfo("../escape.txt", date_time=(1980, 1, 1, 0, 0, 0))
         zi.compress_type = zipfile.ZIP_STORED
         zf.writestr(zi, b"would have escaped")
     dest = tmp_path / "dest"
@@ -176,4 +184,4 @@ def test_e2e_directory_with_empty_subdirs(tmp_path):
 # Pre-HYP-392 a directory offer carrying too many chunk_hashes was
 # rejected here. Post-HYP-392 chunk_hashes ride the subchannel header
 # and that cap is enforced by parse_subchannel_header (see
-# tests/test_subchannel_header.py::test_parse_subchannel_header_rejects_too_many_hashes).
+# test_subchannel_header.py::test_parse_subchannel_header_rejects_too_many_hashes).

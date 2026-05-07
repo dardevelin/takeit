@@ -8,7 +8,12 @@ from twisted.internet.defer import DeferredList, CancelledError
 from twisted.internet.endpoints import serverFromString
 from twisted.internet.protocol import ClientFactory, ServerFactory
 from twisted.internet.address import HostnameAddress, IPv4Address, IPv6Address
-from twisted.internet.error import ConnectingCancelledError, ConnectionRefusedError, DNSLookupError, ConnectError
+from twisted.internet.error import (
+    ConnectingCancelledError,
+    ConnectionRefusedError,
+    DNSLookupError,
+    ConnectError,
+)
 from twisted.python import log
 from .. import ipaddrs  # TODO: move into _dilation/
 from .._interfaces import IDilationConnector, IDilationManager
@@ -18,9 +23,13 @@ from ..util import to_unicode, provides
 from .connection import DilatedConnectionProtocol, KCM
 from .roles import LEADER
 
-from .._hints import (DirectTCPV1Hint, TorTCPV1Hint,
-                      describe_hint_obj, endpoint_from_hint_obj,
-                      encode_hint)
+from .._hints import (
+    DirectTCPV1Hint,
+    TorTCPV1Hint,
+    describe_hint_obj,
+    endpoint_from_hint_obj,
+    encode_hint,
+)
 from .._status import DilationHint
 from ._noise import NoiseConnection
 
@@ -103,7 +112,8 @@ class Connector:
         self._listeners = set()  # IListeningPorts that can be stopped
         self._pending_connectors = set()  # Deferreds that can be cancelled
         self._pending_connections = EmptyableSet(
-            _eventual_queue=self._eventual_queue)  # Protocols to be stopped
+            _eventual_queue=self._eventual_queue
+        )  # Protocols to be stopped
         self._contenders = set()  # viable connections
         self._winning_connection = None
         self._timing = self._timing or DebugTiming()
@@ -112,8 +122,9 @@ class Connector:
     # this describes what our Connector can do, for the initial advertisement
     @classmethod
     def get_connection_abilities(klass):
-        return [{"type": "direct-tcp-v1"},
-                ]
+        return [
+            {"type": "direct-tcp-v1"},
+        ]
 
     def build_protocol(self, addr, description):
         # encryption: let's use Noise NNpsk0 (or maybe NNpsk2). That uses
@@ -129,10 +140,15 @@ class Connector:
             noise.set_as_responder()
             outbound_prologue = PROLOGUE_FOLLOWER
             inbound_prologue = PROLOGUE_LEADER
-        p = DilatedConnectionProtocol(self._eventual_queue, self._role,
-                                      description,
-                                      self, noise,
-                                      outbound_prologue, inbound_prologue)
+        p = DilatedConnectionProtocol(
+            self._eventual_queue,
+            self._role,
+            description,
+            self,
+            noise,
+            outbound_prologue,
+            inbound_prologue,
+        )
         return p
 
     @m.state(initial=True)
@@ -246,8 +262,7 @@ class Connector:
     connecting.upon(listener_ready, enter=connecting, outputs=[publish_hints])
     connecting.upon(got_hints, enter=connecting, outputs=[use_hints])
     connecting.upon(add_candidate, enter=connecting, outputs=[consider])
-    connecting.upon(accept, enter=connected, outputs=[
-                    select_and_stop_remaining])
+    connecting.upon(accept, enter=connected, outputs=[select_and_stop_remaining])
     connecting.upon(stop, enter=stopped, outputs=[stop_everything])
 
     # once connected, we ignore everything except stop
@@ -287,12 +302,14 @@ class Connector:
         def _listening(lp):
             self._listeners.add(lp)  # for shutdown and tests
             portnum = lp.getHost().port
-            direct_hints = [DirectTCPV1Hint(to_unicode(addr), portnum, 0.0)
-                            for addr in addresses]
+            direct_hints = [
+                DirectTCPV1Hint(to_unicode(addr), portnum, 0.0) for addr in addresses
+            ]
             # Publish LAN hints first; STUN-derived reflexive hints are
             # added in a second wave once at least one STUN reply arrives.
             self.listener_ready(direct_hints)
             self._gather_stun_hints(portnum)
+
         d.addCallback(_listening)
         d.addErrback(log.err)
 
@@ -327,23 +344,26 @@ class Connector:
 
         for host, port in self.DEFAULT_STUN_SERVERS:
             d = discover_reflexive_address(
-                self._reactor, host, port, timeout=self.STUN_TIMEOUT)
+                self._reactor, host, port, timeout=self.STUN_TIMEOUT
+            )
             d.addCallbacks(_publish_one, _log_failure)
 
     def _schedule_connection(self, delay, h):
         ep = endpoint_from_hint_obj(h, self._tor, self._reactor)
         desc = describe_hint_obj(h, False, self._tor)
-        d = deferLater(self._reactor, delay,
-                       self._connect, ep, desc)
+        d = deferLater(self._reactor, delay, self._connect, ep, desc)
 
         # "ConnectError" is a base-class in Twisted, but can be raised
         # directly when the "errno to class" mapping doesn't have an
         # error-number mapped
-        d.addErrback(lambda f: f.trap(ConnectingCancelledError,
-                                      ConnectionRefusedError,
-                                      CancelledError,
-                                      ConnectError,
-                                      ))
+        d.addErrback(
+            lambda f: f.trap(
+                ConnectingCancelledError,
+                ConnectionRefusedError,
+                CancelledError,
+                ConnectError,
+            )
+        )
         # TODO: HostnameEndpoint.connect catches CancelledError and replaces
         # it with DNSLookupError. Remove this workaround when
         # https://twistedmatrix.com/trac/ticket/9696 is fixed.
@@ -399,6 +419,7 @@ class Connector:
             # c might not be in _pending_connections, if it turned out to be a
             # winner, which is why we use discard() and not remove()
             p.when_disconnected().addCallback(self._pending_connections.discard)
+
         d.addCallback(_connected)
         return d
 

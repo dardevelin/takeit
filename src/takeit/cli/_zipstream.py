@@ -27,6 +27,7 @@ not expose mtime override on its public API, and the underlying
 `time.localtime()` default is timezone-dependent. The stdlib `zipfile`
 module gives us full control via `ZipInfo.date_time=`.
 """
+
 import hashlib
 import io
 import os
@@ -77,11 +78,11 @@ def walk_directory(root):
                 target = os.path.realpath(full)
                 # commonpath raises on different drives (Windows); we
                 # use prefix-with-sep to be portable.
-                if not (target == root_real or
-                        target.startswith(root_real + os.sep)):
+                if not (target == root_real or target.startswith(root_real + os.sep)):
                     raise ValueError(
                         f"symlink {full!r} points outside the source "
-                        f"directory ({target!r}); refusing")
+                        f"directory ({target!r}); refusing"
+                    )
             files.append(full)
             try:
                 num_bytes += os.path.getsize(full)
@@ -196,13 +197,13 @@ def materialize_and_hash(root, out_path, chunk_size):
             # generator's pieces are not chunk-aligned, so we accumulate.
             while len(pending) >= chunk_size:
                 chunk = bytes(pending[:chunk_size])
-                chunk_hashes.append(
-                    hashlib.blake2b(chunk, digest_size=32).digest())
+                chunk_hashes.append(hashlib.blake2b(chunk, digest_size=32).digest())
                 del pending[:chunk_size]
         # Flush the trailing partial chunk (if any).
         if pending:
             chunk_hashes.append(
-                hashlib.blake2b(bytes(pending), digest_size=32).digest())
+                hashlib.blake2b(bytes(pending), digest_size=32).digest()
+            )
     return size, h_all.digest(), chunk_hashes
 
 
@@ -256,17 +257,13 @@ def _validate_zinfo(zinfo, dest_real):
     name = zinfo.filename
     if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
         # Unix absolute or Windows drive-prefixed
-        raise ValueError(
-            f"absolute path in zip entry: {name!r} (zip-slip attempt)")
+        raise ValueError(f"absolute path in zip entry: {name!r} (zip-slip attempt)")
     # Resolve where the entry would land and ensure it's under dest.
     target = os.path.realpath(os.path.join(dest_real, name))
-    if not (target == dest_real or
-            target.startswith(dest_real + os.sep)):
-        raise ValueError(
-            f"zip entry escapes destination (zip-slip): {name!r}")
+    if not (target == dest_real or target.startswith(dest_real + os.sep)):
+        raise ValueError(f"zip entry escapes destination (zip-slip): {name!r}")
     # Reject symlink entries. The POSIX mode lives in the upper 16 bits
     # of external_attr; S_IFLNK == 0xA000.
     upper = zinfo.external_attr >> 16
     if stat.S_ISLNK(upper):
-        raise ValueError(
-            f"zip entry encodes a symlink ({name!r}); refusing")
+        raise ValueError(f"zip entry encodes a symlink ({name!r}); refusing")

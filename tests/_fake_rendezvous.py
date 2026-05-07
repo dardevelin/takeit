@@ -10,6 +10,7 @@ The fake reads its own `side` from `boss._side` during wire(), so the side
 seen at the rendezvous layer always matches the side embedded in SPAKE2
 payloads. Tests do not pass `side` to the constructor.
 """
+
 from zope.interface import implementer
 
 from takeit import _interfaces
@@ -44,9 +45,9 @@ class FakeRendezvous:
         self._T = None
 
         # Recorded outbound traffic (for assertions)
-        self.opened = []          # list[tag]
-        self.added = []           # list[(phase, body)]
-        self.closed = []          # list[(tag, mood)]
+        self.opened = []  # list[tag]
+        self.added = []  # list[(phase, body)]
+        self.closed = []  # list[(tag, mood)]
 
     # ---- IRendezvous outbound surface ----
 

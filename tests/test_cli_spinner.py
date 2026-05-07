@@ -5,14 +5,12 @@ visible animation is a UI affordance and not directly tested for pixels;
 we test that the right number of frames advance, that NO_COLOR strips
 ANSI, and that start/stop is safe to call multiple times.
 """
-import os
+
 import sys
 
-import pytest
 from twisted.internet.task import Clock
 
 from takeit.cli import _spinner as S
-
 
 # --- rotate_glyph ---
 

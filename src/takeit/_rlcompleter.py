@@ -10,6 +10,7 @@ Compared to upstream wormhole's _rlcompleter:
   completes against the local wordlist for whatever word the user is on.
 - No `choose_nameplate`, no `when_wordlist_is_available`, no `refresh_*`.
 """
+
 import traceback
 from sys import stderr
 
@@ -68,8 +69,7 @@ class CodeInputter:
         self.used_completion = True
         if state == 0:
             debug(f"completer starting ({text!r})")
-            completions = self._bcft(
-                self._input_helper.get_word_completions, text)
+            completions = self._bcft(self._input_helper.get_word_completions, text)
             self._matches = sorted(completions)
             debug(" matches:", " ".join(f"'{m}'" for m in self._matches))
         if state >= len(self._matches):
@@ -117,6 +117,7 @@ def warn_readline():  # pragma: no cover
 def input_with_completion(prompt, input_helper, reactor):
     t = reactor.addSystemEventTrigger("before", "shutdown", warn_readline)
     used_completion = yield deferToThread(
-        _input_code_with_completion, prompt, input_helper, reactor)
+        _input_code_with_completion, prompt, input_helper, reactor
+    )
     reactor.removeSystemEventTrigger(t)
     return used_completion

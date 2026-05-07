@@ -4,14 +4,17 @@ Tests for the minimal STUN client used to discover a reflexive address.
 Wire format covered: RFC 5389 Binding Request / Binding Success Response,
 including XOR-MAPPED-ADDRESS (the only attribute we need).
 """
+
 import os
 import struct
 
 import pytest
 
 from takeit._dilation._stun import (
-    MAGIC_COOKIE, build_binding_request, parse_binding_response,
+    MAGIC_COOKIE,
     StunError,
+    build_binding_request,
+    parse_binding_response,
 )
 
 
@@ -39,12 +42,14 @@ def test_parse_response_with_xor_mapped_address_ipv4():
     real_addr = (203, 0, 113, 99)  # 203.0.113.99 (TEST-NET-3)
 
     x_port = real_port ^ (MAGIC_COOKIE >> 16)
-    addr_int = (real_addr[0] << 24) | (real_addr[1] << 16) \
-        | (real_addr[2] << 8) | real_addr[3]
+    addr_int = (
+        (real_addr[0] << 24) | (real_addr[1] << 16) | (real_addr[2] << 8) | real_addr[3]
+    )
     x_addr = addr_int ^ MAGIC_COOKIE
 
     attr_value = struct.pack(">BBHI", 0, 0x01, x_port, x_addr)
-    attr = struct.pack(">HH", 0x0020, len(attr_value)) + attr_value  # XOR-MAPPED-ADDRESS
+    # 0x0020 = XOR-MAPPED-ADDRESS attribute type
+    attr = struct.pack(">HH", 0x0020, len(attr_value)) + attr_value
 
     header = struct.pack(">HHI12s", 0x0101, len(attr), MAGIC_COOKIE, tx_id)
     response = header + attr
@@ -58,8 +63,8 @@ def test_parse_response_rejects_wrong_transaction_id():
     """A response whose tx_id doesn't match the request must be rejected.
 
     This catches misrouted responses (e.g. on a shared UDP socket)."""
-    sent_tx = b"\xAA" * 12
-    other_tx = b"\xBB" * 12
+    sent_tx = b"\xaa" * 12
+    other_tx = b"\xbb" * 12
     header = struct.pack(">HHI12s", 0x0101, 0, MAGIC_COOKIE, other_tx)
     with pytest.raises(StunError, match="transaction"):
         parse_binding_response(header, sent_tx)
@@ -67,7 +72,7 @@ def test_parse_response_rejects_wrong_transaction_id():
 
 def test_parse_response_rejects_non_success_class():
     """STUN error responses (class=0x0111) are not parsed as binding success."""
-    tx_id = b"\xCC" * 12
+    tx_id = b"\xcc" * 12
     header = struct.pack(">HHI12s", 0x0111, 0, MAGIC_COOKIE, tx_id)
     with pytest.raises(StunError, match="not.*success"):
         parse_binding_response(header, tx_id)
@@ -81,7 +86,7 @@ def test_parse_response_rejects_short_packet():
 
 def test_parse_response_rejects_bad_magic_cookie():
     """Wrong MAGIC_COOKIE means this isn't a STUN message at all."""
-    tx_id = b"\xDD" * 12
+    tx_id = b"\xdd" * 12
     header = struct.pack(">HHI12s", 0x0101, 0, 0xDEADBEEF, tx_id)
     with pytest.raises(StunError, match="cookie"):
         parse_binding_response(header, tx_id)
@@ -90,7 +95,7 @@ def test_parse_response_rejects_bad_magic_cookie():
 def test_parse_response_ignores_unknown_attributes():
     """Unknown attributes (comprehension-optional, type >= 0x8000) must
     not cause parse failures — we just look for XOR-MAPPED-ADDRESS."""
-    tx_id = b"\xEE" * 12
+    tx_id = b"\xee" * 12
     real_port = 8080
     real_addr = (192, 0, 2, 1)
 
@@ -100,8 +105,9 @@ def test_parse_response_ignores_unknown_attributes():
 
     # XOR-MAPPED-ADDRESS
     x_port = real_port ^ (MAGIC_COOKIE >> 16)
-    addr_int = (real_addr[0] << 24) | (real_addr[1] << 16) \
-        | (real_addr[2] << 8) | real_addr[3]
+    addr_int = (
+        (real_addr[0] << 24) | (real_addr[1] << 16) | (real_addr[2] << 8) | real_addr[3]
+    )
     x_addr = addr_int ^ MAGIC_COOKIE
     xma_value = struct.pack(">BBHI", 0, 0x01, x_port, x_addr)
     xma_attr = struct.pack(">HH", 0x0020, len(xma_value)) + xma_value
@@ -124,6 +130,7 @@ def test_parse_response_ignores_unknown_attributes():
 )
 def test_integration_against_real_stun_server():  # pragma: no cover
     from takeit._dilation._stun import discover_reflexive_address_blocking
+
     host, port = os.environ["TAKEIT_TEST_STUN"].split(":")
     addr, port_out = discover_reflexive_address_blocking(host, int(port))
     assert addr.count(".") == 3 or ":" in addr

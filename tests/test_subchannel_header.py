@@ -13,6 +13,7 @@ All header messages are length-prefixed JSON (4-byte big-endian length
 + UTF-8 JSON bytes). MAX_HEADER_BYTES caps the prefix so a hostile
 peer can't claim a 4 GiB body and OOM us.
 """
+
 import base64
 import hashlib
 import json
@@ -21,11 +22,16 @@ import struct
 import pytest
 
 from takeit.cli._protocol import (
-    LengthPrefixedDecoder, MAX_CHUNK_COUNT, MAX_HEADER_BYTES,
-    ProtocolError, build_chunks_have, build_subchannel_header,
-    encode_length_prefixed, parse_chunks_have, parse_subchannel_header,
+    MAX_CHUNK_COUNT,
+    MAX_HEADER_BYTES,
+    LengthPrefixedDecoder,
+    ProtocolError,
+    build_chunks_have,
+    build_subchannel_header,
+    encode_length_prefixed,
+    parse_chunks_have,
+    parse_subchannel_header,
 )
-
 
 # --- length-prefixed framing ---
 
@@ -123,19 +129,23 @@ def test_parse_subchannel_header_rejects_missing_field():
 
 def test_parse_subchannel_header_rejects_bad_hash_length():
     """Each hash must be exactly 32 bytes."""
-    payload = json.dumps({
-        "chunk_hashes": [base64.b64encode(b"\x00" * 16).decode()],
-    }).encode()
+    payload = json.dumps(
+        {
+            "chunk_hashes": [base64.b64encode(b"\x00" * 16).decode()],
+        }
+    ).encode()
     with pytest.raises(ProtocolError, match="32 bytes"):
         parse_subchannel_header(payload)
 
 
 def test_parse_subchannel_header_rejects_too_many_hashes():
     """Same MAX_CHUNK_COUNT cap as the offer — bound memory."""
-    payload = json.dumps({
-        "chunk_hashes": [base64.b64encode(b"\x00" * 32).decode()]
-                        * (MAX_CHUNK_COUNT + 1),
-    }).encode()
+    payload = json.dumps(
+        {
+            "chunk_hashes": [base64.b64encode(b"\x00" * 32).decode()]
+            * (MAX_CHUNK_COUNT + 1),
+        }
+    ).encode()
     with pytest.raises(ProtocolError, match="exceeds"):
         parse_subchannel_header(payload)
 

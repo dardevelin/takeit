@@ -14,14 +14,15 @@ Verified:
 - An out-of-range chunk index errbacks the factory's `done`.
 - After all chunks are sent, the producer is unregistered and closed.
 """
+
 import hashlib
 
 from twisted.internet.defer import Deferred
-from zope.interface import implementer
 from twisted.internet.interfaces import IPullProducer
+from zope.interface import implementer
 
-from takeit.cli import cli as cli_mod
 from takeit.cli import _protocol as P
+from takeit.cli import cli as cli_mod
 
 
 @implementer(IPullProducer)  # we'll verify this via the protocol's behavior
@@ -75,8 +76,8 @@ def _hashes_for(payload, chunk_size):
     hashes = []
     for i in range(0, len(payload), chunk_size):
         hashes.append(
-            hashlib.blake2b(
-                payload[i:i + chunk_size], digest_size=32).digest())
+            hashlib.blake2b(payload[i : i + chunk_size], digest_size=32).digest()
+        )
     return hashes
 
 
@@ -93,8 +94,9 @@ def _setup_proto(tmp_path, payload, chunk_size, chunk_hashes, monkeypatch):
     proto = cli_mod._SenderProtocol(f)
     transport = _FakeTransport()
     proto.transport = transport
-    monkeypatch.setattr(cli_mod, "deferToThread",
-                        lambda fn, *a, **kw: _sync_defer(fn, *a, **kw))
+    monkeypatch.setattr(
+        cli_mod, "deferToThread", lambda fn, *a, **kw: _sync_defer(fn, *a, **kw)
+    )
     proto.connectionMade()
     return proto, transport, f
 
@@ -113,7 +115,8 @@ def test_connection_made_writes_subchannel_header(tmp_path, monkeypatch):
     payload = b"x" * 100
     chunk_hashes = _hashes_for(payload, 50)
     proto, transport, _f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+        tmp_path, payload, 50, chunk_hashes, monkeypatch
+    )
     # Exactly one write so far: the subchannel header.
     assert len(transport.writes) == 1
     assert transport.producer is None
@@ -129,18 +132,17 @@ def test_registers_as_pull_producer_after_reply(tmp_path, monkeypatch):
     payload = b"x" * 100
     chunk_hashes = _hashes_for(payload, 50)
     proto, transport, _f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+        tmp_path, payload, 50, chunk_hashes, monkeypatch
+    )
     _enter_stream_phase(proto, chunks_have=[])
     assert transport.producer is proto
     assert transport.streaming is False  # pull producer
 
 
-def test_resume_producing_advances_one_chunk_at_a_time(
-        tmp_path, monkeypatch):
+def test_resume_producing_advances_one_chunk_at_a_time(tmp_path, monkeypatch):
     payload = b"".join(bytes([i % 256]) * 50 for i in range(4))
     chunk_hashes = _hashes_for(payload, 50)
-    proto, transport, f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    proto, transport, f = _setup_proto(tmp_path, payload, 50, chunk_hashes, monkeypatch)
     _enter_stream_phase(proto, chunks_have=[])
     # Header write counts as one. Drop it from "frame count" math by
     # tracking the writes after entering stream phase.
@@ -198,8 +200,7 @@ def test_out_of_range_chunk_errbacks(tmp_path, monkeypatch):
     payload = b"x" * 50  # only 1 chunk's worth on disk
     # But we hand 6 chunk_hashes — pretend the file should be 6 chunks.
     chunk_hashes = [b"\x00" * 32] * 6
-    proto, transport, f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    proto, transport, f = _setup_proto(tmp_path, payload, 50, chunk_hashes, monkeypatch)
     _enter_stream_phase(proto, chunks_have=[0, 1, 2, 3, 4])  # only idx 5 left
     proto.resumeProducing()
 
@@ -214,7 +215,8 @@ def test_stop_producing_halts_writes(tmp_path, monkeypatch):
     payload = b"x" * 200
     chunk_hashes = _hashes_for(payload, 50)
     proto, transport, _f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+        tmp_path, payload, 50, chunk_hashes, monkeypatch
+    )
     _enter_stream_phase(proto, chunks_have=[])
     pre_stream_writes = len(transport.writes)
 
@@ -230,8 +232,7 @@ def test_resume_skips_chunks_have(tmp_path, monkeypatch):
     only chunks 1 and 3."""
     payload = b"".join(bytes([i]) * 4 for i in range(4))
     chunk_hashes = _hashes_for(payload, 4)
-    proto, transport, _f = _setup_proto(
-        tmp_path, payload, 4, chunk_hashes, monkeypatch)
+    proto, transport, _f = _setup_proto(tmp_path, payload, 4, chunk_hashes, monkeypatch)
     _enter_stream_phase(proto, chunks_have=[0, 2])
     pre_stream_writes = len(transport.writes)
 
@@ -253,8 +254,7 @@ def test_unexpected_data_after_reply_errbacks(tmp_path, monkeypatch):
     further bytes from them are a protocol error."""
     payload = b"x" * 100
     chunk_hashes = _hashes_for(payload, 50)
-    proto, transport, f = _setup_proto(
-        tmp_path, payload, 50, chunk_hashes, monkeypatch)
+    proto, transport, f = _setup_proto(tmp_path, payload, 50, chunk_hashes, monkeypatch)
     _enter_stream_phase(proto, chunks_have=[])
     # Now feed extra bytes — sender should treat this as misbehavior.
     proto.dataReceived(b"unexpected")

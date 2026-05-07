@@ -11,13 +11,13 @@ queue so they run on a fresh reactor turn.
 The test pins the fix by asserting that got_key is NOT observable until
 the eventual queue is flushed.
 """
+
 from twisted.internet.task import Clock, Cooperator
 from zope.interface import implementer
 
 from takeit import _interfaces
 from takeit._boss import Boss
 from takeit.eventual import EventualQueue
-
 from tests._fake_rendezvous import FakeRendezvous, pair
 
 
@@ -32,21 +32,38 @@ class _Wormhole:
         self.messages = []
         self.closed_with = None
 
-    def got_welcome(self, w): self.welcome = w
-    def got_code(self, c): self.code = c
-    def got_key(self, k): self.key = k
-    def got_verifier(self, v): self.verifier = v
-    def got_versions(self, vs): self.versions = vs
-    def received(self, p): self.messages.append(p)
-    def closed(self, r): self.closed_with = r
+    def got_welcome(self, w):
+        self.welcome = w
+
+    def got_code(self, c):
+        self.code = c
+
+    def got_key(self, k):
+        self.key = k
+
+    def got_verifier(self, v):
+        self.verifier = v
+
+    def got_versions(self, vs):
+        self.versions = vs
+
+    def received(self, p):
+        self.messages.append(p)
+
+    def closed(self, r):
+        self.closed_with = r
 
 
 @implementer(_interfaces.ITiming)
 class _Timing:
     def add(self, *a, **kw):
         class _Ctx:
-            def __enter__(self_): return self_
-            def __exit__(self_, *a): return False
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
         return _Ctx()
 
 
@@ -76,6 +93,7 @@ def _build_pair():
             timing=_Timing(),
             rendezvous_factory=factory,
         )
+
     return eq, make("aaaaaa", fa), make("bbbbbb", fb)
 
 
@@ -113,7 +131,9 @@ def test_got_key_does_not_fire_synchronously_from_compute_key():
     # before the fix.
     assert a_key_synchronous is None, (
         "Boss._wormhole.got_key fired synchronously from compute_key "
-        "(re-entrancy bug): _key.py needs eventual-queue gating")
+        "(re-entrancy bug): _key.py needs eventual-queue gating"
+    )
     assert b_key_synchronous is None, (
         "Boss._wormhole.got_key fired synchronously from compute_key "
-        "(re-entrancy bug): _key.py needs eventual-queue gating")
+        "(re-entrancy bug): _key.py needs eventual-queue gating"
+    )

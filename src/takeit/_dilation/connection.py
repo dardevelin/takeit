@@ -11,7 +11,12 @@ from ..observer import OneShotObserver
 from ..util import provides
 from .encode import to_be4, from_be4
 from .roles import LEADER, FOLLOWER
-from ._noise import NoiseInvalidMessage, NoiseHandshakeError, NOISE_MAX_PAYLOAD, NOISE_MAX_CIPHERTEXT
+from ._noise import (
+    NoiseInvalidMessage,
+    NoiseHandshakeError,
+    NOISE_MAX_PAYLOAD,
+    NOISE_MAX_CIPHERTEXT,
+)
 
 # InboundFraming is given data and returns Frames (Noise wire-side
 # bytestrings). It handles the relay handshake and the prologue. The Frames it
@@ -54,6 +59,7 @@ def first(seq):
 
 class Disconnect(Exception):
     pass
+
 
 # all connections look like:
 # (step 1: only for outbound connections)
@@ -144,18 +150,17 @@ class _Framer:
         frame_length = from_be4(self._buffer[0:4])
         if len(self._buffer) < 4 + frame_length:
             return None
-        frame = self._buffer[4:4 + frame_length]
-        self._buffer = self._buffer[4 + frame_length:]  # TODO: avoid copy
+        frame = self._buffer[4 : 4 + frame_length]
+        self._buffer = self._buffer[4 + frame_length :]  # TODO: avoid copy
         return Frame(frame=frame)
 
-    want_prologue.upon(connectionMade, outputs=[send_prologue],
-                       enter=want_prologue)
-    want_prologue.upon(parse, outputs=[parse_prologue], enter=want_prologue,
-                       collector=first)
+    want_prologue.upon(connectionMade, outputs=[send_prologue], enter=want_prologue)
+    want_prologue.upon(
+        parse, outputs=[parse_prologue], enter=want_prologue, collector=first
+    )
     want_prologue.upon(got_prologue, outputs=[can_send_frames], enter=want_frame)
 
-    want_frame.upon(parse, outputs=[parse_frame], enter=want_frame,
-                    collector=first)
+    want_frame.upon(parse, outputs=[parse_frame], enter=want_frame, collector=first)
 
     def _get_expected(self, name, expected):
         lb = len(self._buffer)
@@ -170,7 +175,7 @@ class _Framer:
             # match the expected value, so this can't possibly be right.
             # Don't complain until we see the expected length, or a newline,
             # so we can capture the weird input in the log for debugging.
-            if (b"\n" in self._buffer or lb >= le):
+            if b"\n" in self._buffer or lb >= le:
                 log.msg(f"bad {name}: {self._buffer[:le]}")
                 raise Disconnect()
             return False  # wait a bit longer
@@ -201,6 +206,7 @@ class _Framer:
         assert self._can_send_frames
         self._transport.write(to_be4(len(frame)) + frame)
 
+
 # Prologue: double-newline-terminated this-is-really-wormhole response
 #           from peer. First data received from peer.
 # Frame: Either handshake or encrypted message. Length-prefixed on wire.
@@ -216,7 +222,9 @@ Handshake = namedtuple("Handshake", [])
 KCM = namedtuple("KCM", [])
 Ping = namedtuple("Ping", ["ping_id"])  # ping_id is arbitrary 4-byte value
 Pong = namedtuple("Pong", ["ping_id"])
-Open = namedtuple("Open", ["seqnum", "scid", "subprotocol"])  # seqnum is integer, subprotocol is str
+Open = namedtuple(
+    "Open", ["seqnum", "scid", "subprotocol"]
+)  # seqnum is integer, subprotocol is str
 Data = namedtuple("Data", ["seqnum", "scid", "data"])
 Close = namedtuple("Close", ["seqnum", "scid"])  # scid is integer
 Ack = namedtuple("Ack", ["resp_seqnum"])  # resp_seqnum is integer
@@ -395,7 +403,7 @@ class _Record:
                 start = 0
                 message = b""
                 while start < size:
-                    ciphertext = frame[start:start + NOISE_MAX_CIPHERTEXT]
+                    ciphertext = frame[start : start + NOISE_MAX_CIPHERTEXT]
                     message += self._noise.decrypt(ciphertext)
                     start += NOISE_MAX_CIPHERTEXT
         except NoiseInvalidMessage as e:
@@ -405,20 +413,25 @@ class _Record:
         return parse_record(message)
 
     no_role_set.upon(set_role_leader, outputs=[], enter=want_prologue_leader)
-    want_prologue_leader.upon(got_prologue, outputs=[send_handshake],
-                              enter=want_handshake_leader)
-    want_handshake_leader.upon(got_frame, outputs=[process_handshake],
-                               collector=first, enter=want_message)
+    want_prologue_leader.upon(
+        got_prologue, outputs=[send_handshake], enter=want_handshake_leader
+    )
+    want_handshake_leader.upon(
+        got_frame, outputs=[process_handshake], collector=first, enter=want_message
+    )
 
     no_role_set.upon(set_role_follower, outputs=[], enter=want_prologue_follower)
-    want_prologue_follower.upon(got_prologue, outputs=[],
-                                enter=want_handshake_follower)
-    want_handshake_follower.upon(got_frame, outputs=[process_handshake,
-                                                     ignore_and_send_handshake],
-                                 collector=first, enter=want_message)
+    want_prologue_follower.upon(got_prologue, outputs=[], enter=want_handshake_follower)
+    want_handshake_follower.upon(
+        got_frame,
+        outputs=[process_handshake, ignore_and_send_handshake],
+        collector=first,
+        enter=want_message,
+    )
 
-    want_message.upon(got_frame, outputs=[decrypt_message],
-                      collector=first, enter=want_message)
+    want_message.upon(
+        got_frame, outputs=[decrypt_message], collector=first, enter=want_message
+    )
 
     # external API is: connectionMade, dataReceived, send_record
 
@@ -444,7 +457,7 @@ class _Record:
             start = 0
             frame = b""
             while start < len(message):
-                this_msg = message[start:start + NOISE_MAX_PAYLOAD]
+                this_msg = message[start : start + NOISE_MAX_PAYLOAD]
                 cip = self._noise.encrypt(this_msg)
                 frame += cip
                 start += NOISE_MAX_PAYLOAD
@@ -526,8 +539,9 @@ class DilatedConnectionProtocol(Protocol):
     @m.output()
     def set_manager(self, manager):
         self._manager = manager
-        self.when_disconnected().addCallback(lambda c:
-                                             manager.connector_connection_lost())
+        self.when_disconnected().addCallback(
+            lambda c: manager.connector_connection_lost()
+        )
 
     @m.output()
     def send_status_have_peer(self, manager):
@@ -550,9 +564,16 @@ class DilatedConnectionProtocol(Protocol):
 
     unselected.upon(got_kcm, outputs=[add_candidate], enter=selecting)
     selecting.upon(got_record, outputs=[queue_inbound_record], enter=selecting)
-    selecting.upon(select,
-                   outputs=[set_manager, send_status_have_peer, can_send_records, process_inbound_queue],
-                   enter=selected)
+    selecting.upon(
+        select,
+        outputs=[
+            set_manager,
+            send_status_have_peer,
+            can_send_records,
+            process_inbound_queue,
+        ],
+        enter=selected,
+    )
     selected.upon(got_record, outputs=[deliver_record], enter=selected)
 
     # called by Connector
@@ -574,8 +595,9 @@ class DilatedConnectionProtocol(Protocol):
 
     def connectionMade(self):
         try:
-            framer = _Framer(self.transport,
-                             self._outbound_prologue, self._inbound_prologue)
+            framer = _Framer(
+                self.transport, self._outbound_prologue, self._inbound_prologue
+            )
             self._record = _Record(framer, self._noise, self._role)
             if self._role is LEADER:
                 self._record.set_role_leader()

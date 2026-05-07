@@ -1,19 +1,23 @@
 # Originally from magic-wormhole (MIT, (c) 2015 Brian Warner).
 # Lifted into takeit; see NOTICE for the full list.
 NOISE_MAX_PAYLOAD = (2**16 - 1) - 16  # 65535 minus 16 bytes authentication data
-NOISE_MAX_CIPHERTEXT = (2**16 - 1)  # 65535
+NOISE_MAX_CIPHERTEXT = 2**16 - 1  # 65535
 
 try:
     from noise.exceptions import NoiseInvalidMessage
 except ImportError:
+
     class NoiseInvalidMessage(Exception):
         pass
+
 
 try:
     from noise.exceptions import NoiseHandshakeError
 except ImportError:
+
     class NoiseHandshakeError(Exception):
         pass
+
 
 try:
     from noise.connection import NoiseConnection

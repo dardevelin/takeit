@@ -10,12 +10,12 @@ The code itself is the SPAKE2 password and stays secret. The tag is public —
 it appears on the wire and is visible to relay operators. Tag length and
 charset are chosen to be human-readable in logs and case-insensitive.
 """
+
 import base64
 import string
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
 
 # RFC 4648 base32 lowercase alphabet (no padding).
 TAG_ALPHABET = string.ascii_lowercase + "234567"
@@ -29,7 +29,12 @@ _HKDF_SALT = b"takeit/nostr/v1"
 _HKDF_INFO = b"rendezvous-tag"
 
 
-def _hkdf_extract_and_expand(ikm: bytes, salt: bytes, info: bytes, length: int = _TAG_BYTES) -> bytes:
+def _hkdf_extract_and_expand(
+    ikm: bytes,
+    salt: bytes,
+    info: bytes,
+    length: int = _TAG_BYTES,
+) -> bytes:
     """RFC 5869 HKDF-SHA256."""
     return HKDF(
         algorithm=hashes.SHA256(),

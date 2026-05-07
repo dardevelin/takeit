@@ -9,6 +9,7 @@ to "send 20 bytes of UDP, parse 32 bytes back."
 Used by `Connector.start()` to gather candidate `(reflexive_ip, port)`
 addresses to advertise as DirectTCPV1Hint to the peer.
 """
+
 import os
 import socket
 import struct
@@ -41,12 +42,10 @@ def build_binding_request(transaction_id: bytes) -> bytes:
     """
     if len(transaction_id) != 12:
         raise ValueError("transaction_id must be 12 bytes")
-    return struct.pack(">HHI12s",
-                       _MSG_BINDING_REQUEST, 0, MAGIC_COOKIE, transaction_id)
+    return struct.pack(">HHI12s", _MSG_BINDING_REQUEST, 0, MAGIC_COOKIE, transaction_id)
 
 
-def parse_binding_response(packet: bytes, expected_tx_id: bytes
-                           ) -> tuple[str, int]:
+def parse_binding_response(packet: bytes, expected_tx_id: bytes) -> tuple[str, int]:
     """Parse a STUN Binding Success Response and return (addr, port).
 
     Raises :class:`StunError` if the message is malformed, has the wrong
@@ -67,14 +66,14 @@ def parse_binding_response(packet: bytes, expected_tx_id: bytes
     if len(packet) - 20 < msg_length:
         raise StunError("STUN body shorter than declared length")
 
-    body = packet[20:20 + msg_length]
+    body = packet[20 : 20 + msg_length]
     pos = 0
     while pos + 4 <= len(body):
-        attr_type, attr_len = struct.unpack(">HH", body[pos:pos + 4])
+        attr_type, attr_len = struct.unpack(">HH", body[pos : pos + 4])
         pos += 4
         if pos + attr_len > len(body):
             raise StunError("attribute length overruns body")
-        value = body[pos:pos + attr_len]
+        value = body[pos : pos + attr_len]
         # Attributes are padded to 4-byte boundaries on the wire, but the
         # length field reports unpadded length.
         padded = (attr_len + 3) & ~3
@@ -141,8 +140,7 @@ class _StunDatagramProtocol(DatagramProtocol):
                 pass
 
 
-def discover_reflexive_address(reactor, server_host, server_port,
-                               timeout=2.0):
+def discover_reflexive_address(reactor, server_host, server_port, timeout=2.0):
     """Async STUN binding via the Twisted reactor.
 
     Returns a Deferred firing with ``(reflexive_addr, reflexive_port)`` or
@@ -173,8 +171,7 @@ def discover_reflexive_address(reactor, server_host, server_port,
     return d
 
 
-def discover_reflexive_address_blocking(server_host, server_port,
-                                        timeout=2.0):
+def discover_reflexive_address_blocking(server_host, server_port, timeout=2.0):
     """Synchronous helper for tests / scripting only.
 
     Sends a single UDP Binding Request and parses the response. Not for

@@ -16,8 +16,7 @@ class Receive:
     _side = attrib(validator=instance_of(str))
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         self._key = None
@@ -100,11 +99,12 @@ class Receive:
     S1_unverified_key.upon(
         got_message_good,
         enter=S2_verified_key,
-        outputs=[S_got_verified_key, W_happy, W_got_verifier, W_got_message])
-    S1_unverified_key.upon(
-        got_message_bad, enter=S3_scared, outputs=[W_scared])
+        outputs=[S_got_verified_key, W_happy, W_got_verifier, W_got_message],
+    )
+    S1_unverified_key.upon(got_message_bad, enter=S3_scared, outputs=[W_scared])
     S2_verified_key.upon(got_message_bad, enter=S3_scared, outputs=[W_scared])
     S2_verified_key.upon(
-        got_message_good, enter=S2_verified_key, outputs=[W_got_message])
+        got_message_good, enter=S2_verified_key, outputs=[W_got_message]
+    )
     S3_scared.upon(got_message_good, enter=S3_scared, outputs=[])
     S3_scared.upon(got_message_bad, enter=S3_scared, outputs=[])

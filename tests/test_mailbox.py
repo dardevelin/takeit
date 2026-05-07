@@ -23,6 +23,7 @@ Outputs of interest:
 - _O.got_message(side, phase, body) — forward peer messages (deduped)
 - _T.mailbox_done()          — final ack to Terminator
 """
+
 import pytest
 from zope.interface import implementer
 
@@ -217,6 +218,7 @@ def test_redrain_capped_at_max_processed_phases(mailbox_setup):
     """A malicious peer flooding distinct phase strings cannot grow our
     memory or amplify our outbound past MAX_PROCESSED_PHASES redrains."""
     from takeit._mailbox import Mailbox
+
     mb, rc, order, _ = mailbox_setup
     mb.got_tag("xyz")
     mb.connected()

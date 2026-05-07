@@ -15,9 +15,9 @@ Pure-ASCII glyphs are not used — Unicode block shapes look like a tumbling
 parcel; pure ASCII attempts looked off. Color is takeit's pale violet
 (``#A78BFF``); honors ``NO_COLOR`` and downgrades when stdout isn't a TTY.
 """
+
 import os
 import sys
-
 
 # 4-state rotation, viewed edge-on. Square -> 45° -> vertical -> 45° -> square.
 ROT = ("■", "◆", "▮", "◆")

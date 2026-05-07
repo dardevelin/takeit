@@ -6,6 +6,7 @@ BLAKE2b(stream)`. If the same source directory produced different bytes
 across runs, transfer_id would change, and the receiver's partial would
 be discarded. These tests pin the invariant.
 """
+
 import hashlib
 import io
 import os
@@ -15,7 +16,9 @@ import zipfile
 import pytest
 
 from takeit.cli._zipstream import (
-    deterministic_directory_zip, extract_zip_safely, materialize_and_hash,
+    deterministic_directory_zip,
+    extract_zip_safely,
+    materialize_and_hash,
     walk_directory,
 )
 
@@ -38,12 +41,15 @@ def test_walk_directory_returns_stable_order(tmp_path):
     each level). The exact order doesn't matter for the on-wire format
     as long as it's identical between runs — that's what makes the zip
     stream byte-stable for resume."""
-    _materialize(tmp_path, {
-        "z.txt": b"z",
-        "a.txt": b"a",
-        "sub/c.txt": b"c",
-        "sub/b.txt": b"b",
-    })
+    _materialize(
+        tmp_path,
+        {
+            "z.txt": b"z",
+            "a.txt": b"a",
+            "sub/c.txt": b"c",
+            "sub/b.txt": b"b",
+        },
+    )
     paths_a, num_files, num_bytes = walk_directory(str(tmp_path))
     paths_b, _, _ = walk_directory(str(tmp_path))
     assert paths_a == paths_b
@@ -92,10 +98,13 @@ def test_walk_directory_follows_symlink_pointing_inside_root(tmp_path):
 
 
 def test_zip_stream_yields_valid_zip(tmp_path):
-    _materialize(tmp_path, {
-        "a.txt": b"hello world",
-        "sub/b.txt": b"deeper",
-    })
+    _materialize(
+        tmp_path,
+        {
+            "a.txt": b"hello world",
+            "sub/b.txt": b"deeper",
+        },
+    )
     blob = b"".join(deterministic_directory_zip(str(tmp_path)))
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         names = sorted(zi.filename for zi in zf.infolist())
@@ -107,11 +116,14 @@ def test_zip_stream_yields_valid_zip(tmp_path):
 def test_zip_stream_byte_identical_across_runs(tmp_path):
     """The crucial determinism invariant: same input → same output.
     If this fails, resume breaks."""
-    _materialize(tmp_path, {
-        "a.txt": b"hello",
-        "b.txt": b"world",
-        "sub/c.txt": b"!",
-    })
+    _materialize(
+        tmp_path,
+        {
+            "a.txt": b"hello",
+            "b.txt": b"world",
+            "sub/c.txt": b"!",
+        },
+    )
     a = b"".join(deterministic_directory_zip(str(tmp_path)))
     b = b"".join(deterministic_directory_zip(str(tmp_path)))
     assert a == b
@@ -168,7 +180,8 @@ def test_zip_stream_streams_large_file_without_loading_in_memory(tmp_path):
         sink.write(chunk)
     blob = sink.getvalue()
     assert chunks_yielded >= 4, (
-        f"expected streaming, got only {chunks_yielded} yield(s)")
+        f"expected streaming, got only {chunks_yielded} yield(s)"
+    )
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         assert zf.read("big.bin") == big
 
@@ -207,8 +220,7 @@ def test_extract_zip_safely_rejects_zip_slip_absolute(tmp_path):
     """Absolute paths in zip entries — same defense applies."""
     bad = io.BytesIO()
     with zipfile.ZipFile(bad, "w") as zf:
-        zi = zipfile.ZipInfo("/tmp/escape.txt",
-                             date_time=(1980, 1, 1, 0, 0, 0))
+        zi = zipfile.ZipInfo("/tmp/escape.txt", date_time=(1980, 1, 1, 0, 0, 0))
         zi.compress_type = zipfile.ZIP_STORED
         zf.writestr(zi, b"pwn")
     bad.seek(0)
@@ -270,7 +282,8 @@ def test_materialize_and_hash_returns_correct_hashes(tmp_path):
     _materialize(src, {"a.txt": b"hello", "sub/b.txt": b"world"})
     out = tmp_path / "out.zip"
     size, content_hash, chunk_hashes = materialize_and_hash(
-        str(src), str(out), chunk_size=1 << 20)
+        str(src), str(out), chunk_size=1 << 20
+    )
     # The on-disk file must equal the streamed bytes byte-for-byte.
     blob = b"".join(deterministic_directory_zip(str(src)))
     assert out.read_bytes() == blob
@@ -290,14 +303,16 @@ def test_materialize_and_hash_chunks_correctly_at_boundary(tmp_path):
     _materialize(src, {f"f{i:02d}.bin": b"x" * 100_000 for i in range(15)})
     out = tmp_path / "out.zip"
     size, content_hash, chunk_hashes = materialize_and_hash(
-        str(src), str(out), chunk_size=1 << 20)  # 1 MiB
+        str(src), str(out), chunk_size=1 << 20
+    )  # 1 MiB
     assert size == out.stat().st_size
     # Re-stream and re-hash to verify chunk_hashes match the file.
     blob = out.read_bytes()
     expected_chunks = []
     for i in range(0, len(blob), 1 << 20):
         expected_chunks.append(
-            hashlib.blake2b(blob[i:i + (1 << 20)], digest_size=32).digest())
+            hashlib.blake2b(blob[i : i + (1 << 20)], digest_size=32).digest()
+        )
     assert chunk_hashes == expected_chunks
     assert content_hash == hashlib.blake2b(blob, digest_size=32).digest()
 
@@ -307,7 +322,8 @@ def test_materialize_and_hash_handles_empty_dir(tmp_path):
     src.mkdir()
     out = tmp_path / "out.zip"
     size, content_hash, chunk_hashes = materialize_and_hash(
-        str(src), str(out), chunk_size=1 << 20)
+        str(src), str(out), chunk_size=1 << 20
+    )
     blob = out.read_bytes()
     assert size == len(blob)
     assert content_hash == hashlib.blake2b(blob, digest_size=32).digest()

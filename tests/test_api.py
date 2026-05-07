@@ -2,23 +2,20 @@
 Tests for takeit.api — the public create() entry point and its two
 wormhole modes (Deferred and Delegated).
 """
+
 import pytest
-from twisted.internet.defer import Deferred, ensureDeferred
 from twisted.internet.task import Clock
 from zope.interface import implementer
 
 import takeit
 from takeit import _interfaces
 from takeit.eventual import EventualQueue
-
 from tests._fake_rendezvous import FakeRendezvous, pair
-
 
 # --- shared fixtures ---
 
 
-def _make_wormhole_pair(*, delegate_a=None, delegate_b=None,
-                       code_length=3, **kwargs):
+def _make_wormhole_pair(*, delegate_a=None, delegate_b=None, code_length=3, **kwargs):
     """Build two paired wormholes via FakeRendezvous, ready for handshake."""
     eq = EventualQueue(Clock())
     rv_a = FakeRendezvous("aaaaaa")
@@ -73,13 +70,26 @@ def test_create_returns_delegated_wormhole_when_delegate_given():
 
     @implementer(_interfaces.IWormholeDelegate)
     class Delegate:
-        def wormhole_got_welcome(self, w): pass
-        def wormhole_got_code(self, c): pass
-        def wormhole_got_unverified_key(self, k): pass
-        def wormhole_got_verifier(self, v): pass
-        def wormhole_got_versions(self, vs): pass
-        def wormhole_got_message(self, p): pass
-        def wormhole_closed(self, r): pass
+        def wormhole_got_welcome(self, w):
+            pass
+
+        def wormhole_got_code(self, c):
+            pass
+
+        def wormhole_got_unverified_key(self, k):
+            pass
+
+        def wormhole_got_verifier(self, v):
+            pass
+
+        def wormhole_got_versions(self, vs):
+            pass
+
+        def wormhole_got_message(self, p):
+            pass
+
+        def wormhole_closed(self, r):
+            pass
 
     eq, a, _ = _make_wormhole_pair(delegate_a=Delegate())
     assert not hasattr(a, "get_code")
@@ -170,13 +180,26 @@ def test_delegated_mode_full_handshake_and_message_exchange():
             self.messages = []
             self.closed = None
 
-        def wormhole_got_welcome(self, w): self.welcome = w
-        def wormhole_got_code(self, c): self.code = c
-        def wormhole_got_unverified_key(self, k): self.key = k
-        def wormhole_got_verifier(self, v): self.verifier = v
-        def wormhole_got_versions(self, vs): self.versions = vs
-        def wormhole_got_message(self, p): self.messages.append(p)
-        def wormhole_closed(self, r): self.closed = r
+        def wormhole_got_welcome(self, w):
+            self.welcome = w
+
+        def wormhole_got_code(self, c):
+            self.code = c
+
+        def wormhole_got_unverified_key(self, k):
+            self.key = k
+
+        def wormhole_got_verifier(self, v):
+            self.verifier = v
+
+        def wormhole_got_versions(self, vs):
+            self.versions = vs
+
+        def wormhole_got_message(self, p):
+            self.messages.append(p)
+
+        def wormhole_closed(self, r):
+            self.closed = r
 
     da = Delegate("a")
     db = Delegate("b")
@@ -225,6 +248,7 @@ def test_derive_key_before_key_raises():
     """derive_key before the master key is set raises NoKeyError."""
     eq, a, _ = _make_wormhole_pair()
     from takeit.errors import NoKeyError
+
     with pytest.raises(NoKeyError):
         a.derive_key("anything", 32)
 
@@ -264,6 +288,7 @@ def test_code_length_can_be_overridden():
 def test_relays_default_to_takeit_defaults():
     """When relays=None (or omitted), takeit uses its hardcoded defaults."""
     from takeit.api import DEFAULT_RELAYS
+
     assert isinstance(DEFAULT_RELAYS, tuple)
     assert len(DEFAULT_RELAYS) >= 3
     for r in DEFAULT_RELAYS:

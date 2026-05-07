@@ -16,12 +16,12 @@ All paths use ``os.replace`` for atomic rename of the meta file (writes go
 to ``<meta>.tmp`` first), so a crash mid-write never leaves a corrupt JSON
 parse failure.
 """
+
 import base64
 import hashlib
 import json
 import os
 import time
-
 
 # Filename suffixes — kept here so callers don't pun strings.
 PARTIAL_SUFFIX = ".takeit-partial"
@@ -54,15 +54,15 @@ def load_receiver_state(meta_path):
         return None
     if not isinstance(data, dict):
         return None
-    for key in ("transfer_id", "chunk_size", "size",
-                "chunk_hashes", "chunks_have"):
+    for key in ("transfer_id", "chunk_size", "size", "chunk_hashes", "chunks_have"):
         if key not in data:
             return None
     return data
 
 
-def save_receiver_state(meta_path, transfer_id_b64, size, chunk_size,
-                        chunk_hashes_b64, chunks_have):
+def save_receiver_state(
+    meta_path, transfer_id_b64, size, chunk_size, chunk_hashes_b64, chunks_have
+):
     """Write receiver sidecar atomically."""
     payload = {
         "transfer_id": transfer_id_b64,
@@ -79,8 +79,9 @@ def save_receiver_state(meta_path, transfer_id_b64, size, chunk_size,
     os.replace(tmp, meta_path)
 
 
-def can_resume_with(state, offer_transfer_id_b64, offer_size,
-                    offer_chunk_size, offer_chunk_hashes_b64):
+def can_resume_with(
+    state, offer_transfer_id_b64, offer_size, offer_chunk_size, offer_chunk_hashes_b64
+):
     """Can we resume from this sidecar given a fresh offer?
 
     Resumability requires the *exact* same transfer: matching transfer_id,
@@ -148,8 +149,9 @@ def load_sender_cache(cache_path, source_path):
     return data
 
 
-def save_sender_cache(cache_path, source_path, chunk_size,
-                      content_hash_b64, chunk_hashes_b64):
+def save_sender_cache(
+    cache_path, source_path, chunk_size, content_hash_b64, chunk_hashes_b64
+):
     """Write sender cache atomically, stamped with the file's stat."""
     try:
         st = os.stat(source_path)
@@ -185,8 +187,9 @@ def b64d(s):
 # ---- A5: verify resume bytes against chunk_hashes ----
 
 
-def verify_chunks_have(partial_path, total_size, chunk_size,
-                       chunk_hashes_bytes, claimed_chunks_have):
+def verify_chunks_have(
+    partial_path, total_size, chunk_size, chunk_hashes_bytes, claimed_chunks_have
+):
     """Re-hash each claimed chunk index from disk and return verified set.
 
     A same-user attacker can pre-stage a malicious sidecar whose
@@ -222,8 +225,10 @@ def verify_chunks_have(partial_path, total_size, chunk_size,
                 data = f.read(expected_len)
                 if len(data) != expected_len:
                     continue  # truncated partial; drop
-                if hashlib.blake2b(
-                        data, digest_size=32).digest() == chunk_hashes_bytes[idx]:
+                if (
+                    hashlib.blake2b(data, digest_size=32).digest()
+                    == chunk_hashes_bytes[idx]
+                ):
                     verified.add(idx)
     except OSError:
         return set()
@@ -276,8 +281,16 @@ class ReceiverStateThrottle:
     Total: ~320 MB of redundant disk writes plus 10K fsyncs.
     """
 
-    def __init__(self, meta_path, transfer_id_b64, size, chunk_size,
-                 chunk_hashes_b64, interval=2.0, clock=None):
+    def __init__(
+        self,
+        meta_path,
+        transfer_id_b64,
+        size,
+        chunk_size,
+        chunk_hashes_b64,
+        interval=2.0,
+        clock=None,
+    ):
         self._meta_path = meta_path
         self._transfer_id_b64 = transfer_id_b64
         self._size = size

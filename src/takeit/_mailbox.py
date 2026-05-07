@@ -31,8 +31,7 @@ class Mailbox:
 
     _side = attrib(validator=instance_of(str))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def __attrs_post_init__(self):
         self._tag = None
@@ -234,10 +233,7 @@ class Mailbox:
     S0B.upon(lost, enter=S0A, outputs=[])
     S0B.upon(add_message, enter=S0B, outputs=[queue])
     S0B.upon(close, enter=S4B, outputs=[ignore_mood_and_T_mailbox_done])
-    S0B.upon(
-        got_tag,
-        enter=S2B,
-        outputs=[record_tag_and_RC_tx_open_and_drain])
+    S0B.upon(got_tag, enter=S2B, outputs=[record_tag_and_RC_tx_open_and_drain])
 
     S1A.upon(connected, enter=S2B, outputs=[RC_tx_open, drain])
     S1A.upon(add_message, enter=S1A, outputs=[queue])
@@ -248,8 +244,7 @@ class Mailbox:
     S2A.upon(close, enter=S3A, outputs=[record_mood])
     S2B.upon(lost, enter=S2A, outputs=[])
     S2B.upon(add_message, enter=S2B, outputs=[queue, RC_tx_add])
-    S2B.upon(rx_message_theirs, enter=S2B,
-             outputs=[accept_peer_message_and_redrain])
+    S2B.upon(rx_message_theirs, enter=S2B, outputs=[accept_peer_message_and_redrain])
     S2B.upon(rx_message_ours, enter=S2B, outputs=[noop_on_self_echo])
     S2B.upon(close, enter=S3B, outputs=[record_mood_and_RC_tx_close])
 

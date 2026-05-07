@@ -28,6 +28,7 @@ Concurrency model:
   whose handlers run on the asyncio loop (= the Twisted reactor) and can
   call into `_M.rx_message` directly.
 """
+
 import base64
 import re
 
@@ -36,7 +37,6 @@ from twisted.python import log
 from zope.interface import implementer
 
 from . import _interfaces
-
 
 # Whitelist of valid phase strings on the wormhole control channel. The
 # rendezvous drops events with anything else BEFORE they reach Mailbox —
@@ -131,6 +131,7 @@ class NostrRendezvous:
         # state machine completes. Fire on the next reactor turn so we don't
         # re-enter the state machine that's still processing tx_close.
         from twisted.internet import reactor
+
         reactor.callLater(0, self._M.rx_closed)
 
     # ---- async helpers (run on the asyncio/Twisted loop) ----
@@ -173,12 +174,7 @@ class NostrRendezvous:
         from nostr_sdk import Filter, Kind, Timestamp
 
         self._tag = tag
-        filt = (
-            Filter()
-            .kind(Kind(TAKEIT_KIND))
-            .hashtag(tag)
-            .since(Timestamp.now())
-        )
+        filt = Filter().kind(Kind(TAKEIT_KIND)).hashtag(tag).since(Timestamp.now())
         # Subscribe; nostr-sdk returns an Output with subscription id.
         output = await self._client.subscribe([filt], None)
         self._subscription_id = output.id
@@ -188,9 +184,11 @@ class NostrRendezvous:
         if self._notification_task is None:
             handler = _Handler(self)
             self._notification_task = defer.ensureDeferred(
-                self._client.handle_notifications(handler))
+                self._client.handle_notifications(handler)
+            )
             self._notification_task.addErrback(
-                self._on_async_error, "handle_notifications")
+                self._on_async_error, "handle_notifications"
+            )
 
     async def _async_unsubscribe(self):
         if self._subscription_id is not None:
@@ -204,11 +202,13 @@ class NostrRendezvous:
         from nostr_sdk import EventBuilder, Kind, Tag
 
         content = base64.b64encode(body).decode("ascii")
-        builder = EventBuilder(Kind(TAKEIT_KIND), content).tags([
-            Tag.parse(["t", self._tag]),
-            Tag.parse(["s", self._side]),
-            Tag.parse(["p", phase]),
-        ])
+        builder = EventBuilder(Kind(TAKEIT_KIND), content).tags(
+            [
+                Tag.parse(["t", self._tag]),
+                Tag.parse(["s", self._side]),
+                Tag.parse(["p", phase]),
+            ]
+        )
         if self._pow_difficulty > 0:
             builder = builder.pow(self._pow_difficulty)
         await self._client.send_event_builder(builder)
@@ -232,12 +232,12 @@ class NostrRendezvous:
             elif len(vec) >= 2 and vec[0] == "p":
                 phase = vec[1]
         if side is None or phase is None:
-            log.err(ValueError(
-                "takeit: received Nostr event missing s/p tags; ignoring"))
+            log.err(
+                ValueError("takeit: received Nostr event missing s/p tags; ignoring")
+            )
             return
         if not _is_valid_phase(phase):
-            log.msg(
-                f"takeit: dropping inbound event with invalid phase: {phase!r}")
+            log.msg(f"takeit: dropping inbound event with invalid phase: {phase!r}")
             return
         try:
             body = base64.b64decode(event.content())

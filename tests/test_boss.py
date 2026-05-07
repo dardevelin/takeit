@@ -6,6 +6,7 @@ This is the integration test that proves the takeit wire graph is correct.
 If it passes, every state machine is wired right and outputs fire in the
 expected order during a real protocol exchange.
 """
+
 import pytest
 from twisted.internet.task import Clock, Cooperator
 from zope.interface import implementer
@@ -13,7 +14,6 @@ from zope.interface import implementer
 from takeit import _interfaces
 from takeit._boss import Boss
 from takeit.eventual import EventualQueue
-
 from tests._fake_rendezvous import FakeRendezvous, pair
 
 
@@ -62,8 +62,12 @@ def _new_clock():
 class _FakeTiming:
     def add(self, *a, **kw):
         class _Ctx:
-            def __enter__(self_): return self_
-            def __exit__(self_, *a): return False
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
         return _Ctx()
 
 
@@ -172,6 +176,7 @@ def test_close_before_peer_arrives_is_lonely():
     boss_a.close()
     _flush(eq)
     from takeit.errors import LonelyError
+
     assert isinstance(boss_a._wormhole.closed_with, LonelyError)
 
 
@@ -181,6 +186,7 @@ def test_set_code_twice_raises():
     _flush(eq)
     boss_a.set_code("purple-sausages-mocha")
     from takeit.errors import OnlyOneCodeError
+
     with pytest.raises(OnlyOneCodeError):
         boss_a.set_code("yarn-loafer-stockman")
 
@@ -190,6 +196,7 @@ def test_invalid_code_format_raises():
     boss_a.start()
     _flush(eq)
     from takeit.errors import KeyFormatError
+
     with pytest.raises(KeyFormatError):
         boss_a.set_code("bad code with spaces")
 
@@ -234,7 +241,7 @@ def test_status_progresses_through_handshake():
 
     # Confirm we saw both the alleged-key and confirmed-key statuses.
     from takeit._status import AllegedSharedKey, ConfirmedKey
-    peer_keys = [
-        s.peer_key for s in statuses if s.peer_key is not None]
+
+    peer_keys = [s.peer_key for s in statuses if s.peer_key is not None]
     assert any(isinstance(k, AllegedSharedKey) for k in peer_keys)
     assert any(isinstance(k, ConfirmedKey) for k in peer_keys)

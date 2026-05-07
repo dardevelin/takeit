@@ -1,6 +1,7 @@
-from zope.interface import implementer
-from attr import attrs, attrib
+from attr import attrib, attrs
 from automat import MethodicalMachine
+from zope.interface import implementer
+
 from . import _interfaces
 from ._automat import first as _first
 from .errors import KeyFormatError
@@ -21,8 +22,7 @@ def validate_code(code):
     if any(ch.isspace() for ch in code):
         raise KeyFormatError(f"Code '{code}' contains whitespace.")
     if "-" not in code:
-        raise KeyFormatError(
-            f"Code '{code}' must contain at least one hyphen.")
+        raise KeyFormatError(f"Code '{code}' must contain at least one hyphen.")
 
 
 @attrs
@@ -42,8 +42,7 @@ class Code:
 
     _timing = attrib(validator=provides(_interfaces.ITiming))
     m = MethodicalMachine()
-    set_trace = getattr(m, "_setTrace",
-                        lambda self, f: None)  # pragma: no cover
+    set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     def wire(self, boss, key, input):
         self._B = _interfaces.IBoss(boss)
@@ -113,5 +112,4 @@ class Code:
         outputs=[do_start_input],
         collector=_first,
     )
-    S1_inputting.upon(
-        finished_input, enter=S2_known, outputs=[do_finish_input])
+    S1_inputting.upon(finished_input, enter=S2_known, outputs=[do_finish_input])

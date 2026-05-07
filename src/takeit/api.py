@@ -11,6 +11,7 @@ Two modes match upstream wormhole:
 Construction goes through `takeit.create(...)`; both modes plumb identical
 state through `Boss` and only differ in how inbound events are surfaced.
 """
+
 import os
 import sys
 
@@ -29,7 +30,6 @@ from .eventual import EventualQueue
 from .observer import OneShotObserver, SequenceObserver
 from .timing import DebugTiming
 from .util import bytes_to_hexstr, to_bytes
-
 
 # Hardcoded shortlist of well-known public Nostr relays. Override via
 # `relays=[...]` to takeit.create(), or via `--relay` on the CLI. These are
@@ -85,9 +85,9 @@ class _DelegatedWormhole:
     def close(self):
         self._boss.close()
 
-    def debug_set_trace(self, client_name,
-                        which="B M S O K SK R RC I C T",
-                        file=sys.stderr):
+    def debug_set_trace(
+        self, client_name, which="B M S O K SK R RC I C T", file=sys.stderr
+    ):
         self._boss._set_trace(client_name, which, file)
 
     # ---- inbound (called by Boss) ----
@@ -181,9 +181,9 @@ class _DeferredWormhole:
             self._boss.close()
         return d
 
-    def debug_set_trace(self, client_name,
-                        which="B M S O K SK R RC I C T",
-                        file=sys.stderr):
+    def debug_set_trace(
+        self, client_name, which="B M S O K SK R RC I C T", file=sys.stderr
+    ):
         self._boss._set_trace(client_name, which, file)
 
     # ---- inbound (called by Boss) ----
@@ -230,11 +230,14 @@ def _build_nostr_rendezvous_factory(side, relays):
     Lives behind a deferred import so that test code passing a custom
     `_rendezvous_factory` doesn't pay the cost of importing nostr-sdk.
     """
+
     def factory(boss, mailbox, terminator):
         from ._rendezvous_nostr import NostrRendezvous
+
         rv = NostrRendezvous(side=side, relays=relays)
         rv.wire(boss, mailbox, terminator)
         return rv
+
     return factory
 
 
@@ -287,7 +290,8 @@ def create(
 
     if _rendezvous_factory is None:
         _rendezvous_factory = _build_nostr_rendezvous_factory(
-            side, tuple(relays) if relays is not None else DEFAULT_RELAYS)
+            side, tuple(relays) if relays is not None else DEFAULT_RELAYS
+        )
 
     boss = Boss(
         wormhole=w,
