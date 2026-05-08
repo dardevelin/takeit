@@ -8,7 +8,39 @@ from twisted.python import log
 from twisted.python.reflect import safe_str
 from .._interfaces import IDilationManager, IOutbound
 from ..util import provides
-from .connection import KCM, Ping, Pong, Ack
+from .connection import KCM, Ping, Pong, Ack, Data
+
+
+# HYP-440: cap _outbound_queue's byte footprint so an authenticated
+# peer who withholds ACKs cannot grow sender memory linearly with
+# bytes-sent. 16 MiB matches typical TCP socket-buffer sizes -- high
+# enough that fast-LAN transfers aren't artificially throttled, low
+# enough that worst-case sender memory under adversarial peer is
+# hard-bounded.
+MAX_UNACKED_BYTES = 16 << 20
+
+# Resume producers when the queue drains below half the cap. The
+# hysteresis avoids thrashing pause/resume on every ACK.
+LOW_WATER_UNACKED_BYTES = MAX_UNACKED_BYTES // 2
+
+# HYP-440: ACK heartbeat. If the queue is non-empty for this long
+# without a single retiring ACK, sever the connection -- a peer that
+# stops acknowledging entirely is not coming back. 60s tolerates
+# normal-Internet RTT spikes and slow-link backpressure; an
+# adversarial peer ACKing every 59s can hold the connection open
+# but cannot exceed MAX_UNACKED_BYTES of memory.
+NO_ACK_TIMEOUT_SECONDS = 60.0
+
+
+def _record_byte_size(r):
+    """Return the user-payload byte cost of a record. Only Data
+    records carry user bytes; protocol records (Open/Close/Ack/Ping/
+    Pong/KCM) are tiny and don't count against the cap (counting
+    them would confuse the abstraction -- the cap exists to bound
+    user data, not protocol overhead)."""
+    if isinstance(r, Data):
+        return len(r.data)
+    return 0
 
 
 # Outbound flow control: app writes to subchannel, we write to Connection
@@ -161,6 +193,11 @@ class Outbound:
     # Manage outbound data: subchannel writes to us, we write to transport
     _manager = attrib(validator=provides(IDilationManager))
     _cooperator = attrib()
+    # HYP-440: reactor for the ACK-heartbeat watchdog timer. Defaults
+    # to None for back-compat with library callers that don't drive
+    # the cap-and-heartbeat path; production callers (Manager) pass
+    # the reactor so the watchdog actually fires.
+    _reactor = attrib(default=None)
 
     def __attrs_post_init__(self):
         # _outbound_queue holds all messages we've ever sent but not retired
@@ -179,6 +216,10 @@ class Outbound:
 
         self._connection = None
 
+        # HYP-440: track byte cost of unacked records and the watchdog.
+        self._unacked_bytes = 0
+        self._ack_watchdog = None
+
     def _check_invariants(self):
         assert self._unpaused_producers.isdisjoint(self._paused_producers)
         assert self._paused_producers.union(self._unpaused_producers) == set(
@@ -196,6 +237,9 @@ class Outbound:
         # we always queue it, to resend on a subsequent connection if
         # necessary
         self._outbound_queue.append(r)
+        # HYP-440: track byte cost. Data records carry user payload;
+        # other records are tiny protocol overhead and don't count.
+        self._unacked_bytes += _record_byte_size(r)
 
         if self._connection:
             if self._queued_unsent:
@@ -204,6 +248,18 @@ class Outbound:
             else:
                 # we're allowed to send it immediately
                 self._connection.send_record(r)
+
+        # HYP-440: arm/refresh the ACK heartbeat. While we have any
+        # unacked records, a NO_ACK_TIMEOUT_SECONDS-long silence is
+        # treated as the peer having gone away.
+        if self._unacked_bytes > 0:
+            self._arm_ack_watchdog()
+        # HYP-440: if the queue's byte footprint hit the cap, pause
+        # producers so they stop generating new work. Resume happens
+        # in handle_ack once the queue drains below the low-water
+        # threshold.
+        if self._unacked_bytes >= MAX_UNACKED_BYTES and not self._paused:
+            self.pauseProducing()
 
     def send_if_connected(self, r):
         assert isinstance(r, (KCM, Ping, Pong, Ack)), r  # nothing with seqnum
@@ -287,11 +343,59 @@ class Outbound:
     def handle_ack(self, resp_seqnum):
         # we've received an inbound ack, so retire something
         while self._outbound_queue and self._outbound_queue[0].seqnum <= resp_seqnum:
-            self._outbound_queue.popleft()
+            r = self._outbound_queue.popleft()
+            # HYP-440: subtract the retired record's byte cost.
+            self._unacked_bytes -= _record_byte_size(r)
         while self._queued_unsent and self._queued_unsent[0].seqnum <= resp_seqnum:
             self._queued_unsent.popleft()
         # Inbound is responsible for tracking the high watermark and deciding
         # whether to ignore inbound messages or not
+
+        # HYP-440: a successful ACK proves the peer is still acking;
+        # restart the watchdog clock. Disarm entirely if the queue
+        # is now empty (no work in flight = no reason to fire).
+        if self._unacked_bytes > 0:
+            self._arm_ack_watchdog()
+        else:
+            self._cancel_ack_watchdog()
+        # HYP-440: if the cap previously paused us and the queue has
+        # now drained below the low-water mark, resume producers.
+        if (
+            self._paused
+            and self._unacked_bytes <= LOW_WATER_UNACKED_BYTES
+            and self._connection is not None
+        ):
+            self.resumeProducing()
+
+    # HYP-440: byte-counter accessor for tests and instrumentation.
+    def unacked_bytes(self):
+        return self._unacked_bytes
+
+    # HYP-440: ACK heartbeat watchdog plumbing. Reactor is optional
+    # (callers without a reactor get the cap behavior; only the
+    # heartbeat is gated on reactor availability), so each helper
+    # tolerates `_reactor is None`.
+    def _arm_ack_watchdog(self):
+        if self._reactor is None:
+            return
+        self._cancel_ack_watchdog()
+        self._ack_watchdog = self._reactor.callLater(
+            NO_ACK_TIMEOUT_SECONDS, self._ack_watchdog_fired
+        )
+
+    def _cancel_ack_watchdog(self):
+        if self._ack_watchdog is not None and self._ack_watchdog.active():
+            self._ack_watchdog.cancel()
+        self._ack_watchdog = None
+
+    def _ack_watchdog_fired(self):
+        self._ack_watchdog = None
+        # Tell the manager so it can tear the connection down with
+        # a clear error. If the queue has somehow drained between
+        # the timer firing and now, suppress the call -- the watchdog
+        # is meant to catch ACK-silence, not legitimate completion.
+        if self._unacked_bytes > 0:
+            self._manager.peer_stopped_acking()
 
     # IPushProducer: the active connection calls these because we used
     # c.transport.registerProducer to ask for them

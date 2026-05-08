@@ -330,7 +330,10 @@ class Manager:
         # outbound data (with flow-control going "in"), so I split them up
         # into separate pieces.
         self._inbound = Inbound(self, self._host_addr)
-        self._outbound = Outbound(self, self._cooperator)  # from us to peer
+        # HYP-440: pass reactor so Outbound can run the ACK heartbeat.
+        self._outbound = Outbound(
+            self, self._cooperator, _reactor=self._reactor
+        )  # from us to peer
 
         # TODO: let inbound/outbound create the endpoints, then return them
         # to us
@@ -355,6 +358,28 @@ class Manager:
         Called by the TrafficTimer machine if we should re-connect (due to
         missed pings)
         """
+        if self._connection:
+            self._connection.disconnect()
+
+    def peer_stopped_acking(self):
+        """
+        HYP-440: called by Outbound when the ACK-heartbeat watchdog
+        fires (NO_ACK_TIMEOUT_SECONDS elapsed with the queue still
+        non-empty). The peer has gone silent on the data-record
+        ACK channel; sever the connection so the transfer fails fast
+        with a clear cause rather than growing memory at the cap
+        indefinitely.
+
+        This is distinct from missed-ping detection (handled by the
+        TrafficTimer's _signal_reconnect): pings are a keepalive at
+        the Manager layer; this is a record-level liveness signal.
+        Both ultimately call Connection.disconnect; we keep them
+        separate so log analysis can tell the two failure modes
+        apart.
+        """
+        log.msg(
+            "peer stopped acknowledging records (HYP-440 watchdog fired); disconnecting"
+        )
         if self._connection:
             self._connection.disconnect()
 
