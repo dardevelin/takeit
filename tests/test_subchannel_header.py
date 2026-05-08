@@ -178,6 +178,78 @@ def test_parse_subchannel_header_rejects_bad_base64_per_element():
         parse_subchannel_header(payload)
 
 
+# --- HYP-434: drain_remaining hands back pipelined post-header bytes ---
+
+
+def test_length_prefixed_decoder_drain_remaining_returns_pipelined_tail():
+    """A peer can pipeline `length-prefixed-body || extra-bytes` in one
+    write. After the caller has consumed the body via feed() and
+    bailed out of the generator (e.g. because they want to switch to
+    a different protocol phase), drain_remaining() returns whatever
+    is still in the decoder's buffer.
+
+    The realistic scenario for HYP-434: the caller iterates feed()
+    once to get the header body, then `return`s out of the for-loop.
+    The decoder's `feed()` never gets a chance to interpret the tail
+    as a second length-prefix; we collect it via drain_remaining()
+    and hand it to the next phase's consumer."""
+    from takeit.cli._protocol import LengthPrefixedDecoder, encode_length_prefixed
+
+    decoder = LengthPrefixedDecoder()
+    body = b"hello body"
+    framed = encode_length_prefixed(body)
+    # Use a tail that wouldn't be a valid length prefix if re-fed —
+    # < 4 bytes is the simple shape, because header-decoder only
+    # parses when it has at least 4 bytes. The realistic chunk-frame
+    # tail starts with a chunk_index (4 bytes) + chunk_length (4
+    # bytes); the caller bails out before feed() tries to interpret
+    # those.
+    pipelined = framed + b"tai"
+    bodies_iter = decoder.feed(pipelined)
+    first_body = next(bodies_iter)
+    assert first_body == body
+    # Caller stops iterating. The 3 trailing bytes sit in the buffer.
+    assert decoder.drain_remaining() == b"tai"
+
+
+def test_length_prefixed_decoder_drain_clears_buffer():
+    """Calling drain_remaining empties the buffer so a subsequent feed
+    starts fresh."""
+    from takeit.cli._protocol import LengthPrefixedDecoder, encode_length_prefixed
+
+    decoder = LengthPrefixedDecoder()
+    bodies_iter = decoder.feed(encode_length_prefixed(b"x") + b"tai")
+    next(bodies_iter)  # consume the body
+    assert decoder.drain_remaining() == b"tai"
+    assert decoder.drain_remaining() == b""
+
+
+def test_receiver_data_received_forwards_pipelined_post_header_bytes():
+    """Source-introspect _ReceiverProtocol.dataReceived to pin the
+    drain-and-forward pattern: when the header phase yields a body,
+    the decoder's remaining buffer must be drained and handed to
+    _consume_frames so pipelined chunk bytes don't get stranded.
+
+    Behavioral check via a full transfer is impractical (needs
+    reactor + paired peer); the load-bearing wiring is whether
+    drain_remaining + _consume_frames are called on phase transition.
+    Source-introspection per feedback_no_brittle_format_assertions.md
+    (whitespace-normalized)."""
+    import inspect
+
+    from takeit.cli import cli as cli_mod
+
+    src = inspect.getsource(cli_mod._ReceiverProtocol.dataReceived)
+    normalized = " ".join(src.split())
+    assert "drain_remaining()" in normalized, (
+        "expected dataReceived to call drain_remaining() on phase transition (HYP-434)"
+    )
+    assert "_consume_frames(remaining)" in normalized, (
+        "expected dataReceived to forward drained bytes to "
+        "_consume_frames so pipelined chunk frames are not stranded"
+    )
+
+
 # --- chunks_have (receiver → sender, after partial-file verification) ---
 
 

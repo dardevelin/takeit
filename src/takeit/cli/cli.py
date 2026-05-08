@@ -1555,12 +1555,20 @@ class _ReceiverProtocol(Protocol):
         if self._header_phase:
             try:
                 for body in self._header_decoder.feed(data):
-                    # Got the full header. Any bytes remaining in the
-                    # current `data` after the header are chunk-phase
-                    # frames — but the decoder consumes them one body
-                    # at a time, so subsequent dataReceived calls will
-                    # carry the chunk frames cleanly.
+                    # Got the full header.
                     self._on_header_received(body)
+                    # HYP-434: drain any pipelined post-header bytes the
+                    # decoder buffered with the header. A peer that
+                    # writes `header || first chunk frame` in one TCP
+                    # segment leaves chunk bytes inside the header
+                    # decoder; without draining, the chunk protocol
+                    # stalls waiting for data that already arrived. A
+                    # conforming peer waits for chunks_have before
+                    # sending chunk frames, so this defends against
+                    # mis-implemented or hostile senders.
+                    remaining = self._header_decoder.drain_remaining()
+                    if remaining:
+                        self._consume_frames(remaining)
                     return
             except P.ProtocolError as e:
                 self._fail(e)

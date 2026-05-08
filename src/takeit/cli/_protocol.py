@@ -676,6 +676,19 @@ class LengthPrefixedDecoder:
             del self._buf[:total]
             yield body
 
+    def drain_remaining(self):
+        """Return and clear any bytes still buffered after the caller
+        has stopped consuming bodies. Used by `_ReceiverProtocol` when
+        switching from header phase to chunk phase: a peer that
+        pipelines `header || first chunk frame` in one TCP segment
+        leaves chunk-phase bytes inside the header decoder; without
+        draining, those bytes are stranded and the chunk-phase
+        protocol stalls waiting for data that already arrived. See
+        HYP-434."""
+        remaining = bytes(self._buf)
+        self._buf.clear()
+        return remaining
+
 
 def build_subchannel_header(chunk_hashes):
     """Build the sender's subchannel header carrying chunk_hashes.
