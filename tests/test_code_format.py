@@ -1,9 +1,13 @@
 """
-Tests for takeit's two-part code format (HYP-406).
+Tests for takeit's two-part code format (HYP-406, HYP-432).
 
 Post-HYP-406 a takeit code is `<base32-locator>:<words>`. The locator
 is 128 random bits (16 bytes → 26 base32 chars without padding) carrying
-the public Nostr routing tag; the words are the SPAKE2 password.
+the public Nostr routing tag; the words are the human-readable handoff
+half. The FULL code (locator + colon + words) is what feeds SPAKE2 as
+the password — ~152 bits of entropy vs ~24 from words alone — so a
+hostile relay seeing the public tag cannot precompute the SPAKE2
+exchange (HYP-406).
 
 `parse_code(s)` is the canonical splitter: given a user-typed string,
 return (locator_bytes_or_None, words_str). Words-only handoff (no
@@ -191,3 +195,76 @@ def test_parse_code_words_preserve_case():
     return it weird and let SPAKE2 fail."""
     parsed_loc, words = parse_code("Purple-Sausages-Mocha")
     assert words == "Purple-Sausages-Mocha"
+
+
+# --- HYP-432: SPAKE2 password is the FULL code, not just words ---
+
+
+def test_full_code_is_the_spake2_password():
+    """Pin the security-relevant choice from HYP-406: SPAKE2 receives
+    the FULL user-typed code (locator + colon + words) as its
+    password, NOT just the words. This gives ~152 bits of entropy
+    instead of ~24, which is what defeats the relay-precomputation
+    attack on the public Nostr tag.
+
+    A regression that silently switched back to words-only would
+    weaken the wormhole to the original attack model — passing tests
+    with no obvious broken behavior. Pin the password choice here so
+    that switch can't go unnoticed."""
+    from unittest.mock import patch
+
+    from zope.interface import implementer
+
+    from takeit import _interfaces
+    from takeit._key import _SortedKey
+
+    captured_passwords = []
+
+    class _SniffingSPAKE2:
+        def __init__(self, password, idSymmetric=None):
+            captured_passwords.append(password)
+            self._password = password
+
+        def start(self):
+            return b"\x00" * 33  # SPAKE2_Symmetric msg1 length is 33 bytes
+
+        def finish(self, msg2):
+            return b"\x00" * 32
+
+    @implementer(_interfaces.ITiming)
+    class _DummyTiming:
+        def add(self, *args, **kwargs):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    @implementer(_interfaces.IMailbox)
+    class _DummyMailbox:
+        def add_message(self, phase, body):
+            pass
+
+    sk = _SortedKey(
+        appid="takeit/test",
+        versions={},
+        side="aaaa",
+        timing=_DummyTiming(),
+    )
+    sk._M = _DummyMailbox()  # build_pake calls self._M.add_message
+    full_code = "heu6dar6xjual7jbqhmljqxcx4:purple-sausages-mocha"
+    # build_pake is an Automat @m.output(); driven via got_code input.
+    # remember_code fires first (stores self._code), then build_pake
+    # runs the patched SPAKE2_Symmetric.
+    with patch("takeit._key.SPAKE2_Symmetric", _SniffingSPAKE2):
+        sk.got_code(full_code)
+
+    assert captured_passwords == [full_code.encode("utf-8")], (
+        f"SPAKE2 received {captured_passwords[0]!r}; expected the full "
+        f"code {full_code.encode('utf-8')!r}. If this fails, someone "
+        f"changed the PAKE password from full-code (~152 bits) back to "
+        f"words-only (~24 bits) — that breaks HYP-406's defense against "
+        f"the relay precomputation attack."
+    )

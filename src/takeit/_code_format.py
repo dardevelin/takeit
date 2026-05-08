@@ -6,9 +6,13 @@ Post-HYP-406 a takeit code is one of two shapes:
 1. Canonical: ``<base32-locator>:<words>``
    - locator is 16 bytes (128 bits), random per transfer, base32-encoded
      without padding (26 chars). Carries the public Nostr routing tag.
-   - words is the SPAKE2 password (PGP-wordlist-derived).
-   The colon (`:`) separates the two halves; words use `-` internally
-   so there's no ambiguity.
+   - words is the human-readable handoff half, PGP-wordlist-derived
+     (3 words by default).
+   The FULL code (locator + colon + words) is the SPAKE2 password —
+   ~152 bits of entropy vs ~24 from words-only. The locator is decoupled
+   from the password to prevent a relay precomputation attack on the
+   public tag (HYP-406). The colon (`:`) separates the two halves;
+   words use `-` internally so there's no ambiguity.
 
 2. Legacy words-only: ``<words>``
    - For backwards-compat with words-only handoff. Tag is derived from

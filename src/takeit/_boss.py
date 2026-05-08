@@ -198,7 +198,8 @@ class Boss:
         self._did_start_code = True
         # Mint a fresh 16-byte locator. The user-facing code becomes
         # `<base32-locator>:<words>` (HYP-406): locator carries the
-        # public Nostr routing tag, words are the SPAKE2 password.
+        # public Nostr routing tag, the FULL code is the SPAKE2 password
+        # (~152 bits vs ~24 from words-only).
         locator_b32 = encode_locator(generate_locator())
         self._C.allocate_code(code_length, PGPWordList(), locator_b32=locator_b32)
 
