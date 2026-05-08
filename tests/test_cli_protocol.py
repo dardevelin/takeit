@@ -243,12 +243,19 @@ def _serializable_offer(
     """Build a JSON-serializable offer payload for negative tests.
 
     Post-HYP-392 the offer no longer carries chunk_hashes — those moved
-    to the dilation subchannel. The helper keeps a `chunk_size` so we
-    can still exercise the "chunk_size positive int" guard."""
-    if transfer_id_bytes is None:
-        transfer_id_bytes = b"\x00" * 16
+    to the dilation subchannel. Post-HYP-431 transfer_id must match
+    compute_transfer_id(kind, size, name, content_hash); this helper
+    defaults to the matching value so callers exercising OTHER negative
+    paths don't trip the transfer_id check. Pass
+    `transfer_id_bytes=b"\\xff" * 16` to force a mismatch."""
     if content_hash_bytes is None:
         content_hash_bytes = b"\x00" * 32
+    if transfer_id_bytes is None:
+        from takeit.cli._protocol import KIND_FILE, compute_transfer_id
+
+        transfer_id_bytes = compute_transfer_id(
+            KIND_FILE, size, filename, content_hash_bytes
+        )
     return json.dumps(
         {
             "offer": {
@@ -324,6 +331,70 @@ def test_parse_offer_rejects_invalid_content_hash_base64():
     ).encode()
     with pytest.raises(ProtocolError, match="bad base64 in content_hash"):
         parse_offer(msg)
+
+
+# --- HYP-431: receiver-side transfer_id verification ---
+
+
+def test_parse_offer_rejects_forged_transfer_id_for_file():
+    """A malicious sender can put any 16-byte value as transfer_id.
+    Receiver must recompute compute_transfer_id(kind, size, name,
+    content_hash) and reject mismatches so resume state can't be
+    polluted by attacker-chosen identities."""
+    msg = _serializable_offer(transfer_id_bytes=b"\xff" * 16)
+    with pytest.raises(ProtocolError, match="transfer_id does not match"):
+        parse_offer(msg)
+
+
+def test_parse_offer_accepts_matching_transfer_id_for_file():
+    """Round-trip: an honest sender's compute_transfer_id matches and
+    the offer parses without error."""
+    msg = _serializable_offer()  # default transfer_id is the matching one
+    parsed = parse_offer(msg)
+    assert parsed["kind"] == "file"
+
+
+def test_parse_offer_rejects_forged_transfer_id_for_directory():
+    """Same protection for directory offers."""
+    from takeit.cli._protocol import KIND_DIRECTORY, build_offer_directory
+
+    h = b"\x11" * 32
+    msg = build_offer_directory("docs", 1024, h, num_files=2, num_bytes=512)
+    parsed_dict = json.loads(encode_message(msg).decode())
+    # Sanity-check the helper applies to dirs too: build_offer_directory
+    # produces a transfer_id matching compute_transfer_id of the same
+    # fields, so the round-trip path passes.
+    expected = compute_transfer_id(KIND_DIRECTORY, 1024, "docs", h)
+    assert base64.b64decode(parsed_dict["offer"]["transfer_id"]) == expected
+    # Forge the transfer_id.
+    parsed_dict["offer"]["transfer_id"] = base64.b64encode(b"\xff" * 16).decode()
+    forged = json.dumps(parsed_dict).encode()
+    with pytest.raises(ProtocolError, match="transfer_id does not match"):
+        parse_offer(forged)
+
+
+def test_parse_offer_rejects_forged_transfer_id_for_text():
+    """Text offers compute_text_transfer_id from the text alone; same
+    protection."""
+    from takeit.cli._protocol import build_offer_text
+
+    msg = build_offer_text("hello world")
+    parsed_dict = json.loads(encode_message(msg).decode())
+    parsed_dict["offer"]["transfer_id"] = base64.b64encode(b"\xff" * 16).decode()
+    forged = json.dumps(parsed_dict).encode()
+    with pytest.raises(ProtocolError, match="transfer_id does not match"):
+        parse_offer(forged)
+
+
+def test_parse_offer_round_trip_with_build_offer_file_works():
+    """Regression guard for HYP-431: an honest build_offer_file →
+    parse_offer round-trip continues to succeed (the helpers compute a
+    matching transfer_id, so the check passes)."""
+    h = b"\x42" * 32
+    msg = build_offer_file("readme.txt", 1024, h)
+    parsed = parse_offer(encode_message(msg))
+    assert parsed["filename"] == "readme.txt"
+    assert parsed["size"] == 1024
 
 
 # Pre-HYP-392 tests covered chunk_hashes count/length validation in
@@ -540,17 +611,23 @@ def test_offer_at_max_size_accepted():
 
 def _make_offer_with_filename(filename):
     """Helper for building a syntactically-valid offer with a specific
-    filename, to exercise parse_offer's filename validation."""
-    h_b64 = base64.b64encode(b"\x00" * 32).decode()
-    tid_b64 = base64.b64encode(b"\x00" * 16).decode()
+    filename, to exercise parse_offer's filename validation. Computes
+    a matching transfer_id (HYP-431) so that positive-path tests that
+    pass a valid filename reach the filename check rather than failing
+    on transfer_id mismatch first; for negative tests, the filename
+    check fires before the transfer_id check anyway."""
+    from takeit.cli._protocol import KIND_FILE, compute_transfer_id
+
+    h = b"\x00" * 32
+    tid = compute_transfer_id(KIND_FILE, 0, filename, h)
     return json.dumps(
         {
             "offer": {
                 "kind": "file",
-                "transfer_id": tid_b64,
+                "transfer_id": base64.b64encode(tid).decode(),
                 "filename": filename,
                 "size": 0,
-                "content_hash": h_b64,
+                "content_hash": base64.b64encode(h).decode(),
                 "chunk_size": 1024,
             }
         }

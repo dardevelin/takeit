@@ -41,6 +41,7 @@ Subchannel framing (file/directory; bulk):
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import struct
@@ -356,6 +357,9 @@ def parse_offer(payload):
         raise ProtocolError("transfer_id must be 16 bytes")
     if kind == KIND_FILE:
         _parse_chunked_offer(o, name_field="filename")
+        _check_transfer_id_matches(
+            o, kind, o["size"], o["filename"], o["_content_hash_bytes"]
+        )
     elif kind == KIND_DIRECTORY:
         _parse_chunked_offer(o, name_field="dir_name")
         for field in ("num_files", "num_bytes"):
@@ -368,6 +372,9 @@ def parse_offer(payload):
             raise ProtocolError(
                 "directory offer must not carry 'filename'; use 'dir_name'"
             )
+        _check_transfer_id_matches(
+            o, kind, o["size"], o["dir_name"], o["_content_hash_bytes"]
+        )
     elif kind == KIND_TEXT:
         if "text" not in o:
             raise ProtocolError("text offer missing 'text'")
@@ -375,7 +382,31 @@ def parse_offer(payload):
             raise ProtocolError("text must be str")
         if len(o["text"].encode("utf-8")) > MAX_TEXT_BYTES:
             raise ProtocolError(f"text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+        _check_text_transfer_id_matches(o, o["text"])
     return o
+
+
+def _check_transfer_id_matches(o, kind, size, name, content_hash):
+    """HYP-431: receiver-side verification that the peer's transfer_id
+    matches the offer fields it claims to identify. Without this, a
+    malicious sender can pick any 16-byte value as transfer_id, which
+    is fine for the file-bytes contract (chunk hashes still verify) but
+    breaks the protocol identity contract: receiver-side resume state
+    is keyed on transfer_id, so a forged value can collide with stale
+    sidecars or pollute future legitimate transfers."""
+    expected = compute_transfer_id(kind, size, name, content_hash)
+    if not hmac.compare_digest(expected, o["_transfer_id_bytes"]):
+        raise ProtocolError(
+            "transfer_id does not match the offer's (kind, size, name, content_hash)"
+        )
+
+
+def _check_text_transfer_id_matches(o, text):
+    """HYP-431: text-offer counterpart. compute_text_transfer_id is
+    derived from the text alone — same identity-contract reasoning."""
+    expected = compute_text_transfer_id(text)
+    if not hmac.compare_digest(expected, o["_transfer_id_bytes"]):
+        raise ProtocolError("transfer_id does not match the text payload")
 
 
 def _parse_chunked_offer(o, name_field):
