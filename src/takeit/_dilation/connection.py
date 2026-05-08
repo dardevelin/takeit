@@ -685,7 +685,15 @@ class DilatedConnectionProtocol(Protocol):
                     self.got_kcm()  # connector.add_candidate()
                 else:
                     self.got_record(token)  # manager.got_record()
-        except Disconnect:
+        except (Disconnect, ValueError) as e:
+            # HYP-447: parse_record (post-Noise-decrypt) raises
+            # ValueError on malformed authenticated records — wrong
+            # type byte, length mismatch, etc. Catch alongside
+            # Disconnect so the protocol violation results in clean
+            # transport teardown, not an uncaught Twisted callback
+            # error. log.msg surfaces the cause for operators
+            # without bubbling up.
+            log.msg(f"dilation protocol violation; closing: {e}")
             self.transport.loseConnection()
 
     def connectionLost(self, why=None):

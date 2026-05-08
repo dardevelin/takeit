@@ -464,18 +464,37 @@ class Manager:
     def received_dilation_message(self, plaintext):
         # this receives new in-order DILATE-n payloads, decrypted but not
         # de-JSONed.
+        #
+        # HYP-447: shape-validate before key access. A peer that
+        # passed Noise auth can still send arbitrary JSON inside the
+        # encrypted dilation channel. Bad JSON, non-object payload,
+        # or missing/wrong-type "type" field would otherwise raise
+        # uncaught from this callback. log.msg + return so the
+        # connection survives a single malformed message (the
+        # state machine doesn't consume any state on a dropped
+        # message).
+        try:
+            message = bytes_to_dict(plaintext)
+        except Exception as e:
+            log.msg(f"dilation message: bad JSON; dropping: {e}")
+            return
+        if not isinstance(message, dict):
+            log.msg("dilation message: not a JSON object; dropping")
+            return
+        msg_type = message.get("type")
+        if not isinstance(msg_type, str):
+            log.msg("dilation message: missing or non-string 'type'; dropping")
+            return
 
-        message = bytes_to_dict(plaintext)
-        type = message["type"]
-        if type == "please":
+        if msg_type == "please":
             self.rx_PLEASE(message)
-        elif type == "connection-hints":
+        elif msg_type == "connection-hints":
             self.rx_HINTS(message)
             # todo: could be useful to put "hints" in status, and send
             # a status update when getting new hints?
-        elif type == "reconnect":
+        elif msg_type == "reconnect":
             self.rx_RECONNECT()
-        elif type == "reconnecting":
+        elif msg_type == "reconnecting":
             self.rx_RECONNECTING()
         else:
             log.err(UnknownDilationMessageType(message))
