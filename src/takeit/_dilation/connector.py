@@ -311,12 +311,18 @@ class Connector:
         this is the symmetric sender-side filter so we don't leak our
         internal network topology to every authenticated peer.
 
-        If filtering would leave nothing (e.g. host has only RFC 1918
-        addresses and the user didn't opt in), we still publish them.
-        Otherwise the peer would have NO direct hints, dilation would
-        fall back to relay-only, and the user-visible behavior is "it
-        just doesn't work" — worse than the leak. Logging the
-        fallback is good practice but not blocking."""
+        HYP-439: when filtering would leave nothing (host has only
+        private/CGNAT/VPN/6to4 addresses and the user didn't opt in),
+        return an empty list rather than silently publishing them.
+        The README's privacy boundary is "off means off"; the prior
+        fallback was carried over from upstream wormhole's
+        relay-or-direct architecture, which takeit deliberately
+        replaced. STUN-derived reflexive hints (added in a second
+        wave by `_gather_stun_hints`) can still give the peer a
+        reachable address; if STUN also produces nothing, the
+        connection fails honestly with a clear log message instead
+        of leaking topology to "make it work."
+        """
         if self._allow_private_hints:
             return addresses
         import ipaddress
@@ -333,11 +339,11 @@ class Connector:
                 public.append(addr)
         if not public:
             log.msg(
-                "no public listener addresses to publish; falling back to "
-                "all local addresses (caller can pass --allow-private-hints "
-                "to make this explicit)"
+                "no public listener addresses to publish; relying on "
+                "STUN-derived reflexive hints. Pass --allow-private-hints "
+                "to publish LAN/CGNAT/VPN addresses (will leak topology "
+                "to the peer)."
             )
-            return addresses
         return public
 
     def _start_listener(self, addresses):

@@ -261,15 +261,23 @@ def test_filter_listener_addresses_keeps_ipv6_global_strips_6to4():
     assert filtered == ["2606:4700:4700::1111"]
 
 
-def test_filter_listener_addresses_falls_back_to_all_when_only_private():
-    """If filtering would leave NO addresses (host has only RFC 1918
-    interfaces and the user didn't opt in), publish everything anyway
-    — otherwise dilation falls back to relay-only and the user gets
-    'it just doesn't work', which is worse than a topology leak."""
+def test_filter_listener_addresses_returns_empty_when_only_private():
+    """HYP-439: if filtering would leave NO public addresses and the
+    user did not opt in, return an empty list (NOT a silent fallback
+    that publishes everything). The README's privacy boundary says
+    --allow-private-hints gates LAN/CGNAT/VPN publication; "off means
+    off." STUN-derived hints can still produce a reachable hint pair
+    if the host is behind a NAT with a stable public mapping;
+    otherwise the connection fails honestly with a clear log message
+    rather than silently leaking topology.
+
+    This test replaces the prior `*_falls_back_to_all_when_only_private`
+    that codified the leak (rationale was upstream-wormhole's
+    relay-fallback path; takeit deliberately deleted that path)."""
     fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
     addrs = ["192.168.1.20", "10.0.0.5"]
     filtered = Connector._filter_listener_addresses(fake, addrs)
-    assert filtered == addrs
+    assert filtered == []
 
 
 def test_filter_listener_addresses_keeps_unparseable():
