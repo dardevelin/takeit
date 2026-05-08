@@ -16,6 +16,7 @@ import pytest
 
 from takeit.cli._protocol import (
     DEFAULT_CHUNK_SIZE,
+    MAX_CHUNK_COUNT,
     MAX_FILENAME_BYTES,
     MAX_OFFER_SIZE,
     MAX_TEXT_BYTES,
@@ -191,6 +192,12 @@ def test_build_offer_rejects_non_positive_chunk_size():
         build_offer_file("a.txt", 0, b"\x00" * 32, chunk_size=0)
 
 
+def test_build_offer_rejects_excessive_chunk_count():
+    with pytest.raises(ValueError, match="requires .* chunks"):
+        too_many_chunks_size = (MAX_CHUNK_COUNT + 1) * 1024
+        build_offer_file("a.txt", too_many_chunks_size, b"\x00" * 32, chunk_size=1024)
+
+
 def test_parse_offer_rejects_chunk_hashes_field():
     """chunk_hashes used to live in the offer but moved to the
     subchannel header (HYP-392). A peer sending the old shape is on a
@@ -211,6 +218,13 @@ def test_parse_offer_rejects_chunk_hashes_field():
         }
     ).encode()
     with pytest.raises(ProtocolError, match="chunk_hashes"):
+        parse_offer(msg)
+
+
+def test_parse_offer_rejects_excessive_chunk_count():
+    huge_size = (MAX_CHUNK_COUNT + 1) * 1024
+    msg = _serializable_offer(size=huge_size, chunk_size=1024)
+    with pytest.raises(ProtocolError, match="more than 1048576 chunks"):
         parse_offer(msg)
 
 

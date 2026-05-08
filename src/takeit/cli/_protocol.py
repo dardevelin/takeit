@@ -229,6 +229,11 @@ def _validate_chunked_offer(size, chunk_size):
         raise ValueError(f"offer size {size} exceeds max {MAX_OFFER_SIZE}")
     if chunk_size <= 0:
         raise ValueError(f"non-positive chunk_size: {chunk_size}")
+    chunk_count = expected_chunk_count(size, chunk_size)
+    if chunk_count > MAX_CHUNK_COUNT:
+        raise ValueError(
+            f"offer requires {chunk_count} chunks; max supported is {MAX_CHUNK_COUNT}"
+        )
 
 
 def build_offer_file(
@@ -409,6 +414,11 @@ def _parse_chunked_offer(o, name_field):
         raise ProtocolError(f"bad base64 in content_hash: {e}")
     if len(o["_content_hash_bytes"]) != 32:
         raise ProtocolError("content_hash must be 32 bytes (BLAKE2b-256)")
+    if expected_chunk_count(o["size"], o["chunk_size"]) > MAX_CHUNK_COUNT:
+        raise ProtocolError(
+            f"offer requires more than {MAX_CHUNK_COUNT} chunks; drop to smaller "
+            f"transfer or larger chunk_size"
+        )
 
 
 def build_answer(accept, reject_reason=None):
