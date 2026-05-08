@@ -71,7 +71,7 @@ _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 _SIXTOFOUR_NET = ipaddress.ip_network("2002::/16")
 
 
-def _is_private_or_carrier_grade(ip):
+def is_private_or_carrier_grade(ip):
     """Return True if `ip` should be gated by `--allow-private-hints`.
 
     Catches what `ipaddress.is_private` misses: CGNAT (100.64/10) routes
@@ -124,7 +124,7 @@ def parse_tcp_v1_hint(hint, *, allow_private=False):  # hint_struct -> hint_obj
         if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local:
             log.msg(f"unsafe direct hint address: {hint!r}")
             return None
-        if not allow_private and _is_private_or_carrier_grade(ip):
+        if not allow_private and is_private_or_carrier_grade(ip):
             log.msg(f"private direct hint address requires opt-in: {hint!r}")
             return None
         return DirectTCPV1Hint(str(ip), hint["port"], float(priority))

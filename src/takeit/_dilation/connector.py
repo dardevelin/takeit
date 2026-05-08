@@ -29,6 +29,7 @@ from .._hints import (
     describe_hint_obj,
     endpoint_from_hint_obj,
     encode_hint,
+    is_private_or_carrier_grade,
 )
 from .._status import DilationHint
 from ._noise import NoiseConnection
@@ -87,6 +88,10 @@ class Connector:
     # was self._side = bytes_to_hexstr(os.urandom(8)) # unicode
     _role = attrib()
     _stun_servers = attrib(default=())
+    # HYP-435: gate publication of our own private/CGNAT/VPN IPs as
+    # peer hints. Default False so a user who didn't opt in doesn't leak
+    # their internal network topology to any authenticated peer.
+    _allow_private_hints = attrib(validator=instance_of(bool), default=False)
 
     m = MethodicalMachine()
     set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
@@ -299,6 +304,42 @@ class Connector:
             addresses = non_loopback_addresses
         return addresses
 
+    def _filter_listener_addresses(self, addresses):
+        """HYP-435: filter our own LAN/CGNAT/VPN/6to4 addresses out of
+        the hints we publish to peers, unless --allow-private-hints
+        was set. Receiver-side filtering of peer hints is HYP-425;
+        this is the symmetric sender-side filter so we don't leak our
+        internal network topology to every authenticated peer.
+
+        If filtering would leave nothing (e.g. host has only RFC 1918
+        addresses and the user didn't opt in), we still publish them.
+        Otherwise the peer would have NO direct hints, dilation would
+        fall back to relay-only, and the user-visible behavior is "it
+        just doesn't work" — worse than the leak. Logging the
+        fallback is good practice but not blocking."""
+        if self._allow_private_hints:
+            return addresses
+        import ipaddress
+
+        public = []
+        for addr in addresses:
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                # Couldn't parse — keep, since we don't know what it is.
+                public.append(addr)
+                continue
+            if not is_private_or_carrier_grade(ip):
+                public.append(addr)
+        if not public:
+            log.msg(
+                "no public listener addresses to publish; falling back to "
+                "all local addresses (caller can pass --allow-private-hints "
+                "to make this explicit)"
+            )
+            return addresses
+        return public
+
     def _start_listener(self, addresses):
         # TODO: listen on a fixed port, if possible, for NAT/p2p benefits, also
         # to make firewall configs easier
@@ -310,8 +351,10 @@ class Connector:
         def _listening(lp):
             self._listeners.add(lp)  # for shutdown and tests
             portnum = lp.getHost().port
+            published_addrs = self._filter_listener_addresses(addresses)
             direct_hints = [
-                DirectTCPV1Hint(to_unicode(addr), portnum, 0.0) for addr in addresses
+                DirectTCPV1Hint(to_unicode(addr), portnum, 0.0)
+                for addr in published_addrs
             ]
             # Publish LAN hints first; STUN-derived reflexive hints are
             # added in a second wave once at least one STUN reply arrives.

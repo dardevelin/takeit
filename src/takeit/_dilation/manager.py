@@ -789,6 +789,7 @@ class Manager:
             self._my_side,  # needed for relay handshake
             self._my_role,
             self._stun_servers,
+            self._allow_private_hints,
         )
         if self._debug_stall_connector:
             # unit tests use this hook to send messages while we know we

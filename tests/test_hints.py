@@ -210,3 +210,73 @@ class _NoStunConnector:
 def test_connector_skips_stun_when_no_servers_configured():
     # Should return before importing/using the STUN implementation.
     assert Connector._gather_stun_hints(_NoStunConnector(), 1234) is None
+
+
+# --- HYP-435: filter own LAN/CGNAT/VPN addresses from listener publish ---
+
+
+class _FakeConnectorForListenerFilter:
+    """Minimal stand-in for Connector that exposes
+    `_filter_listener_addresses` for unit testing without spinning up
+    a reactor."""
+
+    def __init__(self, allow_private_hints):
+        self._allow_private_hints = allow_private_hints
+
+
+def test_filter_listener_addresses_strips_private_when_not_opted_in():
+    """RFC 1918, CGNAT, and link-local-style addresses must not be
+    published to peer hints when the user didn't pass
+    --allow-private-hints. Receiver-side filtering of peer hints is
+    HYP-425; this is the symmetric sender-side filter."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = [
+        "8.8.8.8",  # public — keep
+        "192.168.1.20",  # RFC 1918 — strip
+        "100.64.0.1",  # CGNAT — strip
+        "10.0.0.5",  # RFC 1918 — strip
+        "1.1.1.1",  # public — keep
+    ]
+    filtered = Connector._filter_listener_addresses(fake, addrs)
+    assert filtered == ["8.8.8.8", "1.1.1.1"]
+
+
+def test_filter_listener_addresses_publishes_all_when_opted_in():
+    """With --allow-private-hints the user has opted into LAN P2P;
+    publish everything they've got so the peer can connect."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=True)
+    addrs = ["192.168.1.20", "100.64.0.1", "8.8.8.8"]
+    filtered = Connector._filter_listener_addresses(fake, addrs)
+    assert filtered == addrs
+
+
+def test_filter_listener_addresses_keeps_ipv6_global_strips_6to4():
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = [
+        "2606:4700:4700::1111",  # public IPv6 (Cloudflare DNS) — keep
+        "2002::1",  # 6to4 — strip
+        "fd00::1",  # ULA (private) — strip
+    ]
+    filtered = Connector._filter_listener_addresses(fake, addrs)
+    assert filtered == ["2606:4700:4700::1111"]
+
+
+def test_filter_listener_addresses_falls_back_to_all_when_only_private():
+    """If filtering would leave NO addresses (host has only RFC 1918
+    interfaces and the user didn't opt in), publish everything anyway
+    — otherwise dilation falls back to relay-only and the user gets
+    'it just doesn't work', which is worse than a topology leak."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = ["192.168.1.20", "10.0.0.5"]
+    filtered = Connector._filter_listener_addresses(fake, addrs)
+    assert filtered == addrs
+
+
+def test_filter_listener_addresses_keeps_unparseable():
+    """Hostname or unrecognized literal — keep. We don't know what it
+    is, so we don't strip it. The receiver-side validation in
+    parse_tcp_v1_hint enforces IP-literal-only on direct hints."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = ["not-an-ip", "8.8.8.8"]
+    filtered = Connector._filter_listener_addresses(fake, addrs)
+    assert filtered == addrs
