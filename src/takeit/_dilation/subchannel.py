@@ -399,13 +399,20 @@ class SubchannelDemultiplex:
     Helper for Inbound to await factories for particular subprotocols,
     and deliver pending and future OPEN messages to them.
 
-    If expected_subprotocols is `None` (the default) then all incoming
-    OPENs are held pending a future listen. Otherwise,
-    `expected_subprotocols` is a collection of str, where any OPEN not
-    in the list produces an error.
+    `expected_subprotocols` is a (frozen)set of subprotocol-name strings
+    a caller is willing to accept. An OPEN whose name is not in the set
+    raises UnexpectedSubprotocol. Pass `frozenset()` to register the
+    "reject all unknown subprotocols" posture explicitly. None is no
+    longer accepted (HYP-442) — callers must commit to an allowlist.
     """
 
-    def __init__(self, expected_subprotocols=None):
+    def __init__(self, expected_subprotocols):
+        if not isinstance(expected_subprotocols, (set, frozenset)):
+            raise TypeError(
+                "expected_subprotocols must be a set or frozenset; got {!r}".format(
+                    type(expected_subprotocols).__name__
+                )
+            )
         self._factories = dict()  # name -> IProtocolFactory
         self._pending_opens = defaultdict(
             deque
@@ -421,7 +428,7 @@ class SubchannelDemultiplex:
         if name in self._factories:
             self._connect(self._factories[name], t, peer_addr)
         else:
-            if self._expected is not None and name not in self._expected:
+            if name not in self._expected:
                 raise UnexpectedSubprotocol()
             self._pending_opens[name].append((t, peer_addr))
 

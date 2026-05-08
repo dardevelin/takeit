@@ -257,14 +257,19 @@ class Boss:
 
     def dilate(
         self,
+        *,
+        expected_subprotocols,
         transit_relay_location=None,
         no_listen=False,
         on_status_update=None,
         ping_interval=None,
-        expected_subprotocols=None,
     ):
+        # HYP-442: forward keyword-only-required expected_subprotocols
+        # straight through to the Dilator. The TypeError check fires
+        # there; we don't pre-empt it here because that would bury the
+        # actual call site in a stack of indirection.
         return self._D.dilate(
-            transit_relay_location,
+            transit_relay_location=transit_relay_location,
             no_listen=no_listen,
             wormhole_status=self._current_wormhole_status,
             status_update=on_status_update,

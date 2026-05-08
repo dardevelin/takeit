@@ -1020,17 +1020,30 @@ class Dilator:
     # this is the primary entry point, called when w.dilate() is
     # invoked; upstream calls are basically just call-through -- so
     # all these inputs should be validated.
+    #
+    # HYP-442: expected_subprotocols is keyword-only with NO default.
+    # A caller who forgets the kwarg gets a loud TypeError instead of
+    # silently inheriting a legacy "queue every OPEN" posture in
+    # SubchannelDemultiplex. Pass an empty set/frozenset to register
+    # "reject all unknown subprotocols" explicitly.
     def dilate(
         self,
+        *,
+        expected_subprotocols,
         transit_relay_location=None,
         no_listen=False,
         wormhole_status=None,
         status_update=None,
         ping_interval=None,
-        expected_subprotocols=None,
         allow_private_hints=False,
         stun_servers=(),
     ):
+        if not isinstance(expected_subprotocols, (set, frozenset)):
+            raise TypeError(
+                "expected_subprotocols must be a set or frozenset of "
+                "subprotocol-name strings; pass frozenset() to register "
+                "'reject all unknown'"
+            )
         # ensure users can only call this API once -- in the past, it
         # was possible to call the API more than once but any cal
         # after the first would have no real effect:
