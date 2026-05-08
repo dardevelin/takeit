@@ -44,9 +44,15 @@ from ._noise import (
 # states). For the specific question of sending plaintext frames, Noise will
 # refuse us unless it's ready anyways, so the question is probably moot.
 
-# In practice, frames larger than this are rejected before Noise authentication,
-# preventing unbounded buffering from malicious 4-byte length-prefix claims.
-MAX_PRE_AUTH_FRAME_LENGTH = 1 << 20
+# HYP-422 + HYP-430: split frame-length cap into pre- and post-Noise-auth
+# bounds. A pre-auth frame larger than MAX_PRE_AUTH_FRAME_LENGTH is from a
+# LAN attacker reaching our listener; reject before buffering. After Noise
+# completes, a legitimate 1 MiB chunk record + Noise envelope is up to
+# ~1.001 MiB (record header + 17 Noise messages × 16-byte tags), so we
+# loosen to MAX_POST_AUTH_FRAME_LENGTH. The post-auth cap still bounds an
+# authenticated peer claiming an absurd record length.
+MAX_PRE_AUTH_FRAME_LENGTH = 1 << 20  # 1 MiB — generous for ~100-byte handshakes
+MAX_POST_AUTH_FRAME_LENGTH = 4 << 20  # 4 MiB — fits 1 MiB chunks with headroom
 
 
 class IFramer(Interface):
@@ -99,6 +105,18 @@ class _Framer:
     _inbound_prologue = attrib(validator=instance_of(bytes))
     _buffer = b""
     _can_send_frames = False
+    # HYP-430: starts False; flipped to True by mark_handshake_complete()
+    # once Noise has authenticated the peer. Pre-auth uses
+    # MAX_PRE_AUTH_FRAME_LENGTH (tight); post-auth uses
+    # MAX_POST_AUTH_FRAME_LENGTH (accommodates 1 MiB chunk records).
+    _handshake_complete = False
+
+    def mark_handshake_complete(self):
+        """Called by `_Record.process_handshake` once a peer's Noise
+        message has been authenticated. Loosens the frame-length cap
+        from MAX_PRE_AUTH_FRAME_LENGTH to MAX_POST_AUTH_FRAME_LENGTH so
+        legitimate full-chunk data records fit."""
+        self._handshake_complete = True
 
     # in: connectionMade, dataReceived
     # out: prologue_received, frame_received
@@ -152,7 +170,12 @@ class _Framer:
         if len(self._buffer) < 4:
             return None
         frame_length = from_be4(self._buffer[0:4])
-        if frame_length > MAX_PRE_AUTH_FRAME_LENGTH:
+        cap = (
+            MAX_POST_AUTH_FRAME_LENGTH
+            if self._handshake_complete
+            else MAX_PRE_AUTH_FRAME_LENGTH
+        )
+        if frame_length > cap:
             raise Disconnect()
         if len(self._buffer) < 4 + frame_length:
             return None
@@ -424,6 +447,10 @@ class _Record:
         except NoiseInvalidMessage as e:
             log.err(e, "bad inbound noise handshake")
             raise Disconnect()
+        # HYP-430: peer is now Noise-authenticated. Loosen the framer's
+        # pre-auth length cap so full-chunk data records (up to ~1.001
+        # MiB after Noise envelope on a 1 MiB plaintext chunk) fit.
+        self._framer.mark_handshake_complete()
         return Handshake()
 
     @n.output()
