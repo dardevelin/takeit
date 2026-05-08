@@ -29,6 +29,17 @@ from .errors import (
 )
 from .util import bytes_to_dict, provides
 
+# HYP-446: bound `_rx_phases` and `_rx_dilate_seqnums` so an
+# authenticated peer cannot grow Boss memory unboundedly by sending
+# phases far ahead of `_next_rx_*` (the rendezvous regex permits
+# up to 10-digit phase numbers, i.e. ~10^10 distinct slots). 64
+# matches the existing window caps in `_order.py` (MAX_QUEUE_LENGTH)
+# and `_mailbox.py` (MAX_PROCESSED_PHASES) — generous enough for
+# legitimate ordering jitter on a multi-relay Nostr fan-out, tight
+# enough to bound adversarial memory.
+MAX_OUT_OF_ORDER_PHASES = 64
+MAX_OUT_OF_ORDER_DILATE_SEQNUMS = 64
+
 
 @attrs
 @implementer(_interfaces.IBoss)
@@ -326,9 +337,35 @@ class Boss:
         if phase == "version":
             self._got_version(plaintext)
         elif d_mo:
-            self._got_dilate(int(d_mo.group(1)), plaintext)
+            seqnum = int(d_mo.group(1))
+            # HYP-446: drop dilate seqnums outside the receive window
+            # (already-delivered or beyond MAX_OUT_OF_ORDER_DILATE_SEQNUMS
+            # ahead) before they enter the state machine. Authenticated
+            # peer can otherwise inflate `_rx_dilate_seqnums` to
+            # gigabytes by skipping seqnum 0 and parking 10-digit values.
+            if seqnum < self._next_rx_dilate_seqnum:
+                return  # stale (legitimate retransmit OR lazy attacker)
+            if seqnum >= self._next_rx_dilate_seqnum + MAX_OUT_OF_ORDER_DILATE_SEQNUMS:
+                log.msg(
+                    f"dropping out-of-window dilate seqnum {seqnum} "
+                    f"(next={self._next_rx_dilate_seqnum}, "
+                    f"window={MAX_OUT_OF_ORDER_DILATE_SEQNUMS})"
+                )
+                return
+            self._got_dilate(seqnum, plaintext)
         elif re.search(r"^\d+$", phase):
-            self._got_phase(int(phase), plaintext)
+            phase_num = int(phase)
+            # HYP-446: same sliding-window cap on application phases.
+            if phase_num < self._next_rx_phase:
+                return  # stale
+            if phase_num >= self._next_rx_phase + MAX_OUT_OF_ORDER_PHASES:
+                log.msg(
+                    f"dropping out-of-window phase {phase_num} "
+                    f"(next={self._next_rx_phase}, "
+                    f"window={MAX_OUT_OF_ORDER_PHASES})"
+                )
+                return
+            self._got_phase(phase_num, plaintext)
         else:
             # Ignore unrecognized phases for forward-compatibility, but log
             # them so tests catch surprises.
