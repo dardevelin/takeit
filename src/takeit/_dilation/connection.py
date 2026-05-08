@@ -44,6 +44,10 @@ from ._noise import (
 # states). For the specific question of sending plaintext frames, Noise will
 # refuse us unless it's ready anyways, so the question is probably moot.
 
+# In practice, frames larger than this are rejected before Noise authentication,
+# preventing unbounded buffering from malicious 4-byte length-prefix claims.
+MAX_PRE_AUTH_FRAME_LENGTH = 1 << 20
+
 
 class IFramer(Interface):
     pass
@@ -148,6 +152,8 @@ class _Framer:
         if len(self._buffer) < 4:
             return None
         frame_length = from_be4(self._buffer[0:4])
+        if frame_length > MAX_PRE_AUTH_FRAME_LENGTH:
+            raise Disconnect()
         if len(self._buffer) < 4 + frame_length:
             return None
         frame = self._buffer[4 : 4 + frame_length]
