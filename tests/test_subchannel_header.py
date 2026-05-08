@@ -150,6 +150,34 @@ def test_parse_subchannel_header_rejects_too_many_hashes():
         parse_subchannel_header(payload)
 
 
+def test_parse_subchannel_header_validates_per_element_fast():
+    """Post-review fix: per-element length check happens INSIDE the
+    decode loop so a malicious payload with one bad hash fails after
+    decoding only that one element, not the whole list. Belt-and-
+    braces against memory amplification under the count cap."""
+    # First hash valid, second hash wrong length, plus many more valid
+    # entries to confirm we don't decode them all.
+    hashes = [base64.b64encode(b"\x00" * 32).decode()] * 100
+    hashes[1] = base64.b64encode(b"\x00" * 16).decode()  # 16-byte, bad
+    payload = json.dumps({"chunk_hashes": hashes}).encode()
+    with pytest.raises(ProtocolError, match=r"chunk_hashes\[1\]"):
+        parse_subchannel_header(payload)
+
+
+def test_parse_subchannel_header_rejects_non_string_hash_entry():
+    payload = json.dumps({"chunk_hashes": [12345]}).encode()
+    with pytest.raises(ProtocolError, match=r"chunk_hashes\[0\] must be a string"):
+        parse_subchannel_header(payload)
+
+
+def test_parse_subchannel_header_rejects_bad_base64_per_element():
+    payload = json.dumps(
+        {"chunk_hashes": [base64.b64encode(b"\x00" * 32).decode(), "***not-base64***"]}
+    ).encode()
+    with pytest.raises(ProtocolError, match=r"chunk_hashes\[1\]"):
+        parse_subchannel_header(payload)
+
+
 # --- chunks_have (receiver → sender, after partial-file verification) ---
 
 

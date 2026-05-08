@@ -63,6 +63,34 @@ def endpoint_from_hint_obj(hint, tor, reactor):
     return None
 
 
+# Carrier-grade NAT (RFC 6598) — routable inside an ISP, not flagged as
+# private by `ipaddress`. Treat as private for the opt-in gate.
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+# 6to4 (RFC 3056) — public-routable but commonly bridges to internal IPv4
+# space; require opt-in to avoid SSRF-via-IPv6-tunnel surprises.
+_SIXTOFOUR_NET = ipaddress.ip_network("2002::/16")
+
+
+def _is_private_or_carrier_grade(ip):
+    """Return True if `ip` should be gated by `--allow-private-hints`.
+
+    Catches what `ipaddress.is_private` misses: CGNAT (100.64/10) routes
+    inside ISPs without being marked private, and 6to4 (2002::/16) is
+    `is_global=True` but bridges to potentially-internal IPv4. IPv4-mapped
+    IPv6 is normalized to its IPv4 form before the check so that a
+    public address wrapped as `::ffff:8.8.8.8` is not falsely rejected.
+    """
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.is_private:
+        return True
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NET:
+        return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _SIXTOFOUR_NET:
+        return True
+    return False
+
+
 def parse_tcp_v1_hint(hint, *, allow_private=False):  # hint_struct -> hint_obj
     hint_type = hint.get("type", "")
     if hint_type not in ["direct-tcp-v1", "tor-tcp-v1"]:
@@ -96,7 +124,7 @@ def parse_tcp_v1_hint(hint, *, allow_private=False):  # hint_struct -> hint_obj
         if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local:
             log.msg(f"unsafe direct hint address: {hint!r}")
             return None
-        if ip.is_private and not allow_private:
+        if not allow_private and _is_private_or_carrier_grade(ip):
             log.msg(f"private direct hint address requires opt-in: {hint!r}")
             return None
         return DirectTCPV1Hint(str(ip), hint["port"], float(priority))

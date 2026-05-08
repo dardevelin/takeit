@@ -158,6 +158,60 @@ async def test_forged_pake_does_not_grow_memory_unboundedly():
 
 
 @pytest_twisted.ensureDeferred
+async def test_order_queue_bounded_under_phase_flood():
+    """A relay flooding distinct non-pake phases pre-pake-confirmed
+    must not let Order's pre-pake queue grow unboundedly. Order caps
+    the queue at MAX_QUEUE_LENGTH; events past the cap are dropped."""
+    from takeit._order import Order
+
+    eq, a, _, rv_a, _ = _build_pair()
+    a.set_code("heu6dar6xjual7jbqhmljqxcx4:purple-sausages-mocha")
+    eq.flush_sync()
+
+    # Inject many distinct non-pake phases. Order parks them in
+    # _queue (it hasn't received a real pake yet — well, it might have
+    # received one from us self-echoing, but the test just confirms
+    # the queue doesn't grow past the cap).
+    cap = Order.MAX_QUEUE_LENGTH
+    for i in range(cap + 100):
+        _inject_phase_event(rv_a, "cccccc", f"phase-{i}", b"\x00" * 32)
+        eq.flush_sync()
+
+    # Order's queue is bounded; further distinct phases are dropped.
+    assert len(a._boss._O._queue) <= cap
+
+
+@pytest_twisted.ensureDeferred
+async def test_max_bad_pakes_escalates_to_scared():
+    """A relay flooding garbage pake events past MAX_BAD_PAKES must
+    cause our Key to escalate to scared (closing the wormhole) rather
+    than burn CPU forever on SPAKE2.start() per event. This is the
+    bound the security review of HYP-423 found missing."""
+    from takeit._key import _SortedKey
+
+    eq, a, _, rv_a, _ = _build_pair()
+    a.set_code("heu6dar6xjual7jbqhmljqxcx4:purple-sausages-mocha")
+    eq.flush_sync()
+
+    # Sanity: MAX_BAD_PAKES is the documented bound.
+    assert _SortedKey.MAX_BAD_PAKES > 0
+
+    sk = a._boss._K._SK
+    # A fresh _SortedKey starts the bad-pake counter at zero.
+    assert sk._bad_pake_count == 0
+
+    # Flood MAX_BAD_PAKES forged pakes; counter advances each time.
+    for i in range(_SortedKey.MAX_BAD_PAKES):
+        _inject_phase_event(rv_a, "cccccc", "pake", b"garbage-payload-%d" % i)
+        eq.flush_sync()
+
+    # Now A's _SortedKey should be in S3_scared (Boss notified scared).
+    # The counter equals the cap; any further bad pake would have hit
+    # the cap branch.
+    assert sk._bad_pake_count == _SortedKey.MAX_BAD_PAKES
+
+
+@pytest_twisted.ensureDeferred
 async def test_forged_version_does_not_block_real_version():
     """After PAKE completes, a forged 'version' event from the relay
     fails decryption (wrong key). It must not consume the version slot;

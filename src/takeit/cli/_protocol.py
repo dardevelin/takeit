@@ -671,13 +671,24 @@ def parse_subchannel_header(payload):
         raise ProtocolError(
             f"chunk_hashes count {len(chunk_hashes_b64)} exceeds max {MAX_CHUNK_COUNT}"
         )
-    try:
-        chunk_hashes = [base64.b64decode(h) for h in chunk_hashes_b64]
-    except Exception as e:
-        raise ProtocolError(f"bad base64 in chunk_hashes: {e}")
-    for h in chunk_hashes:
-        if len(h) != 32:
-            raise ProtocolError("each chunk hash must be 32 bytes")
+    # Validate per-element to fail fast on a malicious payload — past
+    # the count cap, a 1M-entry list of oversized base64 strings would
+    # otherwise materialize ~150 MB of bytes before the size check.
+    chunk_hashes = []
+    for i, h in enumerate(chunk_hashes_b64):
+        if not isinstance(h, str):
+            raise ProtocolError(
+                f"chunk_hashes[{i}] must be a string, got {type(h).__name__}"
+            )
+        try:
+            decoded = base64.b64decode(h, validate=True)
+        except Exception as e:
+            raise ProtocolError(f"bad base64 in chunk_hashes[{i}]: {e}")
+        if len(decoded) != 32:
+            raise ProtocolError(
+                f"chunk_hashes[{i}] must be 32 bytes, got {len(decoded)}"
+            )
+        chunk_hashes.append(decoded)
     return chunk_hashes
 
 

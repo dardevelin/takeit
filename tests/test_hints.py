@@ -39,6 +39,60 @@ def test_parse_direct_hint_accepts_public_ip_literal_by_default():
     assert hint == DirectTCPV1Hint("8.8.8.8", 1234, 0.0)
 
 
+# Post-review additions: ipaddress.is_private misses these but they're
+# routable inside ISPs / private dual-stack networks and so should be
+# gated by --allow-private-hints.
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "100.64.0.1",  # CGNAT (RFC 6598)
+        "100.127.255.254",  # CGNAT upper edge
+    ],
+)
+def test_parse_direct_hint_rejects_cgnat_by_default(host):
+    assert parse_tcp_v1_hint(_direct(host)) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "100.64.0.1",
+        "100.127.255.254",
+    ],
+)
+def test_parse_direct_hint_accepts_cgnat_with_opt_in(host):
+    hint = parse_tcp_v1_hint(_direct(host), allow_private=True)
+    assert hint == DirectTCPV1Hint(host, 1234, 0.0)
+
+
+def test_parse_direct_hint_rejects_6to4_by_default():
+    assert parse_tcp_v1_hint(_direct("2002::1")) is None
+
+
+def test_parse_direct_hint_accepts_6to4_with_opt_in():
+    hint = parse_tcp_v1_hint(_direct("2002::1"), allow_private=True)
+    assert hint == DirectTCPV1Hint("2002::1", 1234, 0.0)
+
+
+def test_parse_direct_hint_accepts_ipv4_mapped_public_ipv6_by_default():
+    """`::ffff:8.8.8.8` is the IPv4-mapped form of a PUBLIC IPv4. Without
+    normalization, ipaddress.is_private returns True for these — which
+    would falsely reject legitimate dual-stack peers. We unwrap the
+    mapping before the private check."""
+    hint = parse_tcp_v1_hint(_direct("::ffff:8.8.8.8"))
+    assert hint == DirectTCPV1Hint("::ffff:8.8.8.8", 1234, 0.0)
+
+
+def test_parse_direct_hint_rejects_ipv4_mapped_private_ipv6():
+    """`::ffff:192.168.1.1` is the IPv4-mapped form of a PRIVATE IPv4;
+    must still be gated by allow_private."""
+    assert parse_tcp_v1_hint(_direct("::ffff:192.168.1.1")) is None
+    hint = parse_tcp_v1_hint(_direct("::ffff:192.168.1.1"), allow_private=True)
+    assert hint is not None
+
+
 def test_parse_tor_hint_allows_hostname():
     hint = parse_tcp_v1_hint(_tor("example.com", priority=2))
     assert hint == TorTCPV1Hint("example.com", 1234, 2.0)

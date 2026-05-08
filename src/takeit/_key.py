@@ -143,6 +143,17 @@ class _SortedKey:
     m = MethodicalMachine()
     set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
+    # HYP-423: cap on consecutive bad pakes before escalating to
+    # S3_scared. Each forged pake costs us a fresh SPAKE2.start() —
+    # asymmetric work (relay pays a b64 broadcast, we pay elliptic-
+    # curve setup). 16 bounds the CPU damage; a real peer produces
+    # one pake. After the cap the wormhole is unrecoverable; user
+    # retries against a different relay set.
+    MAX_BAD_PAKES = 16
+
+    def __attrs_post_init__(self):
+        self._bad_pake_count = 0
+
     def wire(self, boss, mailbox, receive, order):
         self._B = _interfaces.IBoss(boss)
         self._M = _interfaces.IMailbox(mailbox)
@@ -208,8 +219,17 @@ class _SortedKey:
         self.got_pake_good(key)
 
     def _on_bad_pake(self):
+        self._bad_pake_count += 1
         self._M.peer_message_not_authenticated("pake")
-        self.got_pake_bad()
+        if self._bad_pake_count >= self.MAX_BAD_PAKES:
+            # Sustained relay garbage; the rendezvous is unrecoverable.
+            self.got_pake_giveup()
+        else:
+            self.got_pake_bad()
+
+    @m.input()
+    def got_pake_giveup(self):
+        pass
 
     @m.input()
     def got_pake_good(self, key):
@@ -235,6 +255,28 @@ class _SortedKey:
 
     @m.output()
     def compute_key(self, key):
+        # HYP-423 ordering invariant: this method runs synchronously
+        # inside the Mailbox→Order→Key chain triggered by an inbound
+        # peer event. Several side effects below re-enter Mailbox/
+        # Order via further inbound forwards (Mailbox's drain
+        # republishes our pending outbound, which the peer answers
+        # with `version`, which lands at our Order before this method
+        # returns). The order of operations below is load-bearing:
+        #
+        #   1. R.got_key — Receive must have the key before any
+        #      version event reaches it.
+        #   2. O.pake_confirmed — drains Order's queued non-pake events
+        #      to Receive (now keyed). Must follow R.got_key.
+        #   3. M.peer_message_authenticated — closes Mailbox's pending
+        #      slot for "pake" and triggers redrain of our outbound.
+        #   4. M.add_message("version", ...) — publishes our version.
+        #
+        # Steps 3 and 4 may publish events that the peer answers with
+        # further inbounds, which may re-enter this entire chain. By
+        # then we're at S2_know_key and Receive holds the key, so the
+        # re-entry is safe. If you reorder these calls, run
+        # tests/test_relay_phase_poisoning.py — the ordering is what
+        # makes the relay-poison test pass.
         assert isinstance(key, bytes)
         # HYP-423 ordering: set R.got_key BEFORE peer_message_authenticated
         # so that any incoming non-pake events triggered by the auth
@@ -280,7 +322,9 @@ class _SortedKey:
     S1_know_code.upon(got_pake_good, enter=S2_know_key, outputs=[compute_key])
     # HYP-423: a single bad pake does NOT poison the wormhole. We stay
     # in S1_know_code so the next pake (likely the real peer's) gets a
-    # chance.
+    # chance. After MAX_BAD_PAKES sustained failures we escalate via
+    # got_pake_giveup so a relay can't burn our CPU forever.
     S1_know_code.upon(got_pake_bad, enter=S1_know_code, outputs=[])
+    S1_know_code.upon(got_pake_giveup, enter=S3_scared, outputs=[scared])
     S2_know_key.upon(got_pake_good, enter=S2_know_key, outputs=[])
     S2_know_key.upon(got_pake_bad, enter=S2_know_key, outputs=[])

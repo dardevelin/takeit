@@ -17,6 +17,17 @@ class Order:
     m = MethodicalMachine()
     set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
+    # HYP-423 (post-review): cap on pre-pake queue length. Mailbox bounds
+    # `_pending_phases` at 64 distinct phases, but Mailbox forwards each
+    # forwarded phase to Order's `got_message` even past the cap (so a
+    # late legit phase isn't starved by an earlier flood). That can pile
+    # up in Order's queue while we wait for a real `pake` that confirms
+    # the key. 64 phases × 64 KiB body = 4 MiB upper bound; we cap the
+    # queue at the same 64 to match the Mailbox bound. Past the cap,
+    # additional non-pake events are dropped (they couldn't decrypt
+    # without a key anyway).
+    MAX_QUEUE_LENGTH = 64
+
     def __attrs_post_init__(self):
         self._key = None
         self._queue = []
@@ -67,6 +78,11 @@ class Order:
         assert isinstance(side, str), type(phase)
         assert isinstance(phase, str), type(phase)
         assert isinstance(body, bytes), type(body)
+        if len(self._queue) >= self.MAX_QUEUE_LENGTH:
+            # HYP-423: bounded against a relay flooding distinct
+            # non-pake phases pre-handshake. Drop further events; the
+            # legitimate peer's events will be in the first 64.
+            return
         self._queue.append((side, phase, body))
 
     @m.output()

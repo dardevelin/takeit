@@ -216,14 +216,18 @@ class Mailbox:
 
     @m.output()
     def _accept_peer_message(self, phase):
-        # Auth verdict arrived: this phase is real. Clear pending,
-        # mark processed, redrain outbound.
+        # Auth verdict arrived: this phase is real. Clear pending and
+        # ALWAYS redrain outbound — even if we've hit
+        # MAX_PROCESSED_PHASES, the "peer just confirmed subscribed"
+        # signal still matters for reliability (Nostr doesn't buffer
+        # ephemeral events, so we re-publish so the peer can see what
+        # they may have missed). We stop GROWING `_processed` past the
+        # cap so memory is bounded; redrains themselves are cheap (we
+        # publish a finite number of distinct phases).
         self._pending_phases.pop(phase, None)
-        if phase in self._processed:
-            return  # idempotent (e.g. double-callback)
-        if len(self._processed) >= self.MAX_PROCESSED_PHASES:
-            return  # bounded; ignore further redrain effects
-        self._processed.add(phase)
+        if phase not in self._processed:
+            if len(self._processed) < self.MAX_PROCESSED_PHASES:
+                self._processed.add(phase)
         self._drain()
 
     @m.output()
