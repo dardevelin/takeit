@@ -45,13 +45,77 @@ def derive_phase_key(key, side, phase):
     return derive_key(key, purpose)
 
 
+# HYP-426: ciphertext padding to fixed-length buckets.
+#
+# Threat: SecretBox is length-preserving. A relay observing the
+# base64-encoded event content can read off `len(plaintext) + 40`
+# (40 = nonce + auth tag) bytes and infer plaintext size. For the
+# inline-text phase that leaks a precise message size; for control
+# phases it leaks protocol-shape information.
+#
+# Mitigation: before encrypting, prepend a 4-byte big-endian length
+# prefix and right-pad with zeros to the next bucket size. All events
+# in a bucket produce identical ciphertext sizes, so the relay only
+# learns which bucket — short / medium / large / max — the plaintext
+# fell into.
+#
+# Bucket sizes were chosen so:
+# - The smallest covers all known control phases (`pake`, `version`,
+#   `dilate-N`) which are typically <200 bytes.
+# - The largest plus SecretBox overhead (40 bytes) fits under
+#   `_rendezvous_nostr.MAX_INBOUND_EVENT_CONTENT_BYTES` (64 KiB) so a
+#   max-size legal event still passes the inbound cap.
+# - Boundaries are powers of 2 (256 / 4096 / 16384) where they fit;
+#   the largest is hand-tuned to maximize bucket use within the cap.
+PADDING_LENGTH_PREFIX_BYTES = 4
+PADDING_BUCKETS = (256, 4096, 16384, 65496)
+
+
+def _pad_to_bucket(plaintext):
+    """Prepend a 4-byte length prefix and right-pad with zeros to the
+    next bucket >= the framed length. Raises ValueError if no bucket
+    is large enough (caller must respect MAX_TEXT_BYTES at the layer
+    above)."""
+    framed_len = PADDING_LENGTH_PREFIX_BYTES + len(plaintext)
+    bucket = None
+    for b in PADDING_BUCKETS:
+        if b >= framed_len:
+            bucket = b
+            break
+    if bucket is None:
+        raise ValueError(
+            f"plaintext of {len(plaintext)} bytes exceeds largest padding "
+            f"bucket ({PADDING_BUCKETS[-1] - PADDING_LENGTH_PREFIX_BYTES})"
+        )
+    prefix = len(plaintext).to_bytes(PADDING_LENGTH_PREFIX_BYTES, "big")
+    pad = b"\x00" * (bucket - framed_len)
+    return prefix + plaintext + pad
+
+
+def _unpad_bucket(padded):
+    """Inverse of `_pad_to_bucket`. Reads the 4-byte length prefix and
+    returns the original plaintext. Raises ValueError if the prefix
+    declares more bytes than the padded payload could hold (a malformed
+    or attacker-forged ciphertext that decrypted-but-shouldn't-have)."""
+    if len(padded) < PADDING_LENGTH_PREFIX_BYTES:
+        raise ValueError("padded payload too short for length prefix")
+    declared = int.from_bytes(padded[:PADDING_LENGTH_PREFIX_BYTES], "big")
+    payload = padded[PADDING_LENGTH_PREFIX_BYTES:]
+    if declared > len(payload):
+        raise ValueError(
+            f"padded length prefix declares {declared} bytes but "
+            f"payload has only {len(payload)}"
+        )
+    return payload[:declared]
+
+
 def decrypt_data(key, encrypted):
     assert isinstance(key, bytes), type(key)
     assert isinstance(encrypted, bytes), type(encrypted)
     assert len(key) == SecretBox.KEY_SIZE, len(key)
     box = SecretBox(key)
-    data = box.decrypt(encrypted)
-    return data
+    padded = box.decrypt(encrypted)
+    return _unpad_bucket(padded)
 
 
 def encrypt_data(key, plaintext):
@@ -60,7 +124,7 @@ def encrypt_data(key, plaintext):
     assert len(key) == SecretBox.KEY_SIZE, len(key)
     box = SecretBox(key)
     nonce = utils.random(SecretBox.NONCE_SIZE)
-    return box.encrypt(plaintext, nonce)
+    return box.encrypt(_pad_to_bucket(plaintext), nonce)
 
 
 # the Key we expose to callers (Boss, Ordering) is responsible for sorting

@@ -153,8 +153,10 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
 - **Wrong code → no transfer.** A bad guess fails immediately and
   closes the connection. Brute-force isn't practical.
 - **Your filename, file size, and inline text are plaintext-confidential** —
-  relays do not get the decrypted values. They can still infer metadata
-  from ciphertext length, phase tags, event count, and timing.
+  relays do not get the decrypted values. Ciphertext is padded to a
+  small set of size buckets, so relays only learn which bucket — short,
+  medium, large — the plaintext fell into. They can still see phase
+  tags, event count, and timing.
 - **Want to be extra sure?** Pass `--verify` on both sides. takeit
   shows a short authentication string after the code is exchanged;
   read it out loud and the receiver checks it matches before any
@@ -164,8 +166,8 @@ A few honest limits:
 
 - This is private transfer, not anonymous transfer. Public Nostr relays
   see client IPs, timing, subscriptions, phase tags, event counts, and
-  ciphertext lengths on a takeit-style tag. They do not see decrypted file
-  bytes, filenames, file sizes, or inline text.
+  ciphertext size buckets on a takeit-style tag. They do not see decrypted
+  file bytes, filenames, file sizes, or inline text.
 - Peers can see direct connection hints you choose to advertise. Private
   LAN hint connections require `--allow-private-hints`; STUN-derived
   public-IP hints require explicit `--stun-server HOST:PORT`.
