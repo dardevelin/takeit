@@ -4,10 +4,11 @@ to fixed-length buckets so a relay observing event content size cannot
 infer plaintext length.
 
 The wire shape: encrypt_data(key, plaintext) returns
-SecretBox(nonce || ciphertext) where ciphertext = enc(length_prefix ||
-plaintext || zero_pad). length_prefix is 4 bytes big-endian; zero_pad
-fills to the next bucket size. decrypt_data unwraps the bucket back
-to the original plaintext.
+SecretBox(nonce || ciphertext) where ciphertext = enc(version ||
+length_prefix || plaintext || zero_pad). version is one byte
+(_PADDING_VERSION = 1) and length_prefix is the next 3 bytes
+big-endian. zero_pad fills to the next bucket size. decrypt_data
+unwraps the bucket back to the original plaintext.
 
 Threat model (from the 5th-pass audit):
 > "relays do not see plaintext, but they do see phase, timing, event
@@ -118,6 +119,35 @@ def test_decrypt_rejects_truncated_ciphertext():
         decrypt_data(KEY, ct[:-10])
 
 
+def test_decrypt_rejects_unknown_padding_version():
+    """A future client may bump _PADDING_VERSION. Today's decrypt must
+    refuse a payload that has an unknown version byte rather than slice
+    bytes assuming the v1 layout."""
+    from nacl import utils
+    from nacl.secret import SecretBox
+
+    box = SecretBox(KEY)
+    bogus_padded = (
+        bytes((99,))
+        + (5).to_bytes(3, "big")
+        + b"hello"
+        + bytes(_PADDING_BUCKETS[0] - _PADDING_LENGTH_PREFIX_BYTES - 5)
+    )
+    nonce = utils.random(SecretBox.NONCE_SIZE)
+    ct = box.encrypt(bogus_padded, nonce)
+    with pytest.raises(ValueError, match="unknown padding version"):
+        decrypt_data(KEY, ct)
+
+
+def test_padding_layout_is_version_1():
+    """Pin the on-the-wire format: the first byte of the padded
+    plaintext is the padding version. Future changes to the framing
+    must bump _PADDING_VERSION."""
+    from takeit._key import _PADDING_VERSION
+
+    assert _PADDING_VERSION == 1
+
+
 def test_decrypt_rejects_bad_length_prefix():
     """A ciphertext that decrypts but has a length prefix larger than
     its padded plaintext is malformed. We refuse rather than slice
@@ -125,11 +155,16 @@ def test_decrypt_rejects_bad_length_prefix():
     from nacl import utils
     from nacl.secret import SecretBox
 
+    from takeit._key import _PADDING_VERSION
+
     box = SecretBox(KEY)
-    # Forge a padded payload claiming length 999 inside a 256-byte
-    # bucket. The receiver should refuse.
-    bogus_padded = (999).to_bytes(_PADDING_LENGTH_PREFIX_BYTES, "big") + b"\x00" * (
-        _PADDING_BUCKETS[0] - _PADDING_LENGTH_PREFIX_BYTES
+    # Forge a padded payload with a valid version byte but a 3-byte
+    # length declaring 999 bytes inside a 256-byte bucket. Receiver
+    # should refuse rather than slice past the buffer.
+    bogus_padded = (
+        bytes((_PADDING_VERSION,))
+        + (999).to_bytes(3, "big")
+        + b"\x00" * (_PADDING_BUCKETS[0] - _PADDING_LENGTH_PREFIX_BYTES)
     )
     nonce = utils.random(SecretBox.NONCE_SIZE)
     ct = box.encrypt(bogus_padded, nonce)

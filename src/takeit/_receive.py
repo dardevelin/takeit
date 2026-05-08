@@ -56,7 +56,12 @@ class Receive:
         data_key = derive_phase_key(self._key, side, phase)
         try:
             plaintext = decrypt_data(data_key, body)
-        except CryptoError:
+        except (CryptoError, ValueError):
+            # CryptoError: SecretBox MAC failure (wrong key / forged
+            # ciphertext from relay). ValueError: padded payload's
+            # length prefix or version byte is malformed (a forged
+            # ciphertext that decrypted-but-shouldn't-have). Both
+            # are auth failures from this layer's perspective.
             self._M.peer_message_not_authenticated(phase)
             self.got_message_bad()
             return

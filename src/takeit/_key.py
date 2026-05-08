@@ -53,16 +53,43 @@ def derive_phase_key(key, side, phase):
 # DERIVED from the rendezvous inbound cap minus SecretBox overhead, so
 # the largest legal ciphertext still passes the inbound size check no
 # matter what libsodium decides about overhead in the future.
-_PADDING_LENGTH_PREFIX_BYTES = 4
+# Wire-format prefix shape: 1 version byte + 3 length bytes (big-endian).
+# Splitting one byte off the length prefix gives us a forward-compat
+# escape hatch: bumping _PADDING_VERSION lets a future change (e.g.
+# random padding instead of zero, larger buckets) co-exist on the wire
+# with the v1 format, since a receiver can dispatch on the version
+# byte before slicing. The 24-bit length cap (16 MiB) is far larger
+# than any conceivable bucket and matches MAX_INBOUND_EVENT_CONTENT_BYTES
+# (64 KiB) with massive headroom.
+_PADDING_VERSION = 1
+_PADDING_LENGTH_PREFIX_BYTES = 4  # 1 byte version + 3 bytes length
+
 _SECRETBOX_OVERHEAD = SecretBox.NONCE_SIZE + SecretBox.MACBYTES
 _MAX_PADDED_PLAINTEXT = MAX_INBOUND_EVENT_CONTENT_BYTES - _SECRETBOX_OVERHEAD
 _PADDING_BUCKETS = (256, 4096, 16384, _MAX_PADDED_PLAINTEXT)
 
+# Load-bearing zero-margin invariant: the largest bucket is sized so
+# its ciphertext exactly equals MAX_INBOUND_EVENT_CONTENT_BYTES. The
+# receiver's inbound check at _rendezvous_nostr.py uses STRICT `>`
+# (`if len(body) > MAX_INBOUND_EVENT_CONTENT_BYTES: drop`), so a
+# max-bucket event passes; flipping that check to `>=` would silently
+# drop our largest legal events. Don't change it without changing this.
+#
+# Real runtime check (not `assert`, so it survives `python -O`): if a
+# future libsodium overhead bump shrinks _MAX_PADDED_PLAINTEXT below
+# 16384, the bucket sequence wouldn't be monotonic and bucket
+# selection would silently pick a too-small one.
+if not all(a < b for a, b in zip(_PADDING_BUCKETS, _PADDING_BUCKETS[1:])):
+    raise RuntimeError(  # pragma: no cover
+        f"_PADDING_BUCKETS not strictly increasing ({_PADDING_BUCKETS}); "
+        "SecretBox overhead changed?"
+    )
+
 
 def _pad_to_bucket(plaintext):
-    """Frame `plaintext` as `<4-byte big-endian length><plaintext><zeros>`
-    padded up to the smallest bucket that fits. Raises ValueError if no
-    bucket is large enough."""
+    """Frame `plaintext` as `<1-byte version><3-byte big-endian length>
+    <plaintext><zeros>` padded up to the smallest bucket that fits.
+    Raises ValueError if no bucket is large enough."""
     framed_len = _PADDING_LENGTH_PREFIX_BYTES + len(plaintext)
     bucket = next((b for b in _PADDING_BUCKETS if b >= framed_len), None)
     if bucket is None:
@@ -70,19 +97,26 @@ def _pad_to_bucket(plaintext):
             f"plaintext of {len(plaintext)} bytes exceeds largest padding "
             f"bucket ({_PADDING_BUCKETS[-1] - _PADDING_LENGTH_PREFIX_BYTES})"
         )
-    prefix = len(plaintext).to_bytes(_PADDING_LENGTH_PREFIX_BYTES, "big")
+    prefix = bytes((_PADDING_VERSION,)) + len(plaintext).to_bytes(3, "big")
     return b"".join((prefix, plaintext, bytes(bucket - framed_len)))
 
 
 def _unpad_bucket(padded):
-    """Inverse of `_pad_to_bucket`. Raises ValueError if the prefix
-    declares more bytes than the padded payload could hold (a forged
-    ciphertext that decrypted-but-shouldn't-have). The explicit bound
-    check matters: a Python slice would silently truncate to whatever
-    bytes happen to be present, masking the corruption."""
+    """Inverse of `_pad_to_bucket`. Raises ValueError if the version
+    byte is unknown or the length prefix declares more bytes than the
+    padded payload could hold (a forged ciphertext that
+    decrypted-but-shouldn't-have). The explicit bound check matters:
+    a Python slice would silently truncate to whatever bytes happen to
+    be present, masking the corruption."""
     if len(padded) < _PADDING_LENGTH_PREFIX_BYTES:
         raise ValueError("padded payload too short for length prefix")
-    declared = int.from_bytes(padded[:_PADDING_LENGTH_PREFIX_BYTES], "big")
+    version = padded[0]
+    if version != _PADDING_VERSION:
+        raise ValueError(
+            f"unknown padding version {version}; this build supports "
+            f"version {_PADDING_VERSION}"
+        )
+    declared = int.from_bytes(padded[1:_PADDING_LENGTH_PREFIX_BYTES], "big")
     end = _PADDING_LENGTH_PREFIX_BYTES + declared
     if end > len(padded):
         raise ValueError(
