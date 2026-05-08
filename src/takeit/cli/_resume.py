@@ -29,6 +29,45 @@ META_SUFFIX = ".takeit-partial.meta"
 SENT_META_SUFFIX = ".takeit-sent.meta"
 
 
+def _atomic_write_json(target_path, payload):
+    """HYP-436: write `payload` (JSON-serializable) to `target_path`
+    atomically via a `.tmp` file, hardened against symlink swaps and
+    permissive umasks. The pattern mirrors HYP-407's sender-zip
+    hardening:
+
+    - O_EXCL refuses to overwrite a pre-existing tmp (which a local
+      attacker could have laid there as a symlink to a victim path).
+    - O_NOFOLLOW refuses to traverse a tmp that's a symlink (defense
+      in depth alongside O_EXCL).
+    - 0o600 bypasses the user's umask so the sidecar isn't
+      world-readable. Sidecars carry chunk_hashes (BLAKE2b digests of
+      file chunks) which fingerprint the file content; not secret per
+      se but unnecessary to leak.
+
+    On failure, the partial tmp is unlinked so a stale .tmp doesn't
+    block future writes (subsequent O_EXCL would fail). os.replace is
+    atomic on POSIX and Windows, so a crash between fsync and replace
+    leaves the prior sidecar intact."""
+    tmp = target_path + ".tmp"
+    fd = os.open(
+        tmp,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    os.replace(tmp, target_path)
+
+
 # ---- receiver-side sidecar ----
 
 
@@ -63,7 +102,8 @@ def load_receiver_state(meta_path):
 def save_receiver_state(
     meta_path, transfer_id_b64, size, chunk_size, chunk_hashes_b64, chunks_have
 ):
-    """Write receiver sidecar atomically."""
+    """Write receiver sidecar atomically and hardened (O_EXCL|O_NOFOLLOW
+    + 0o600). See `_atomic_write_json` for rationale."""
     payload = {
         "transfer_id": transfer_id_b64,
         "size": size,
@@ -71,12 +111,7 @@ def save_receiver_state(
         "chunk_hashes": chunk_hashes_b64,
         "chunks_have": sorted(set(chunks_have)),
     }
-    tmp = meta_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, meta_path)
+    _atomic_write_json(meta_path, payload)
 
 
 def can_resume_with(
@@ -152,7 +187,14 @@ def load_sender_cache(cache_path, source_path):
 def save_sender_cache(
     cache_path, source_path, chunk_size, content_hash_b64, chunk_hashes_b64
 ):
-    """Write sender cache atomically, stamped with the file's stat."""
+    """Write sender cache atomically and hardened (O_EXCL|O_NOFOLLOW
+    + 0o600), stamped with the file's stat. See `_atomic_write_json`
+    for rationale.
+
+    The cache is best-effort: if `_atomic_write_json` raises (e.g.
+    a stale .tmp from a prior crash, or a hostile pre-created
+    symlink), we swallow and skip rather than fail the parent
+    command. The user re-hashes the file next time."""
     try:
         st = os.stat(source_path)
     except OSError:
@@ -165,12 +207,11 @@ def save_sender_cache(
         "content_hash": content_hash_b64,
         "chunk_hashes": chunk_hashes_b64,
     }
-    tmp = cache_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, cache_path)
+    try:
+        _atomic_write_json(cache_path, payload)
+    except OSError:
+        # Sidecar write failures are non-fatal — re-hash next run.
+        return
 
 
 # ---- helpers ----

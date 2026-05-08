@@ -5,6 +5,9 @@ Tests for the resume sidecar module.
 import hashlib
 import json
 import os
+import stat
+
+import pytest
 
 from takeit.cli._resume import (
     META_SUFFIX,
@@ -461,3 +464,98 @@ def test_throttle_amortizes_writes_for_long_transfer(tmp_path):
 
     # Initial write + final flush = 2 (no intermediate writes within 2 s).
     assert write_count[0] == 2
+
+
+# --- HYP-436: sidecar tmp writes refuse symlinks and are 0o600 ---
+
+
+def test_save_receiver_state_refuses_symlink_at_tmp_path(tmp_path):
+    """A local attacker who can write to the meta directory could
+    pre-create the .tmp path as a symlink to ~/.bashrc or another
+    user-writable victim. The save must refuse rather than truncate
+    the symlink target.
+
+    Pre-fix this used `open(tmp, "w")` which follows symlinks; with
+    the post-HYP-436 helper it's `os.open(... O_NOFOLLOW)`."""
+    meta_path = tmp_path / "transfer.meta"
+    tmp_at_meta = tmp_path / "transfer.meta.tmp"
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"important contents")
+    # Attacker pre-creates the .tmp path as a symlink to the victim.
+    os.symlink(str(victim), str(tmp_at_meta))
+
+    with pytest.raises(OSError):
+        save_receiver_state(str(meta_path), "tid", 10, 5, ["h0", "h1"], [0])
+
+    # Victim must NOT have been truncated.
+    assert victim.read_bytes() == b"important contents"
+
+
+def test_save_receiver_state_refuses_pre_existing_tmp(tmp_path):
+    """O_EXCL: a pre-existing .tmp path is refused even when it's a
+    plain file (not a symlink). This catches the "stale .tmp from a
+    prior crash" case too — caller is expected to clean up before
+    retrying."""
+    meta_path = tmp_path / "transfer.meta"
+    tmp_at_meta = tmp_path / "transfer.meta.tmp"
+    tmp_at_meta.write_bytes(b"stale")
+
+    with pytest.raises(FileExistsError):
+        save_receiver_state(str(meta_path), "tid", 10, 5, ["h0", "h1"], [0])
+
+
+def test_save_receiver_state_writes_0o600_regardless_of_umask(tmp_path):
+    """Sidecar contains chunk_hashes (BLAKE2b digests of file chunks)
+    which fingerprint file content. Even with a permissive umask the
+    file must end up 0o600."""
+    old_umask = os.umask(0o000)  # widest umask possible
+    try:
+        meta_path = tmp_path / "transfer.meta"
+        save_receiver_state(str(meta_path), "tid", 10, 5, ["h0", "h1"], [0])
+        mode = stat.S_IMODE(os.stat(str(meta_path)).st_mode)
+        assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+    finally:
+        os.umask(old_umask)
+
+
+def test_save_sender_cache_refuses_symlink_at_tmp_path(tmp_path):
+    """Same hardening as the receiver sidecar; sender cache write also
+    must not follow symlinks at the .tmp path."""
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"source bytes")
+    cache = tmp_path / "src.takeit-sent.meta"
+    tmp_at_cache = tmp_path / "src.takeit-sent.meta.tmp"
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"important")
+    os.symlink(str(victim), str(tmp_at_cache))
+
+    # save_sender_cache swallows OSError so the parent send doesn't
+    # fail; just verify the cache file isn't written and victim is
+    # untouched.
+    save_sender_cache(str(cache), str(src), 50, "ch", ["h0", "h1"])
+    assert not cache.exists()
+    assert victim.read_bytes() == b"important"
+
+
+def test_save_sender_cache_writes_0o600_regardless_of_umask(tmp_path):
+    """Cache write also gets 0o600 mode."""
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"source bytes")
+    cache = tmp_path / "src.takeit-sent.meta"
+    old_umask = os.umask(0o000)
+    try:
+        save_sender_cache(str(cache), str(src), 50, "ch", ["h0", "h1"])
+        mode = stat.S_IMODE(os.stat(str(cache)).st_mode)
+        assert mode == 0o600
+    finally:
+        os.umask(old_umask)
+
+
+def test_save_receiver_state_round_trip_still_works(tmp_path):
+    """Regression: the hardening shouldn't break the legitimate happy
+    path. A clean meta_path round-trips through save → load."""
+    meta_path = tmp_path / "transfer.meta"
+    save_receiver_state(str(meta_path), "tid", 100, 32, ["h0", "h1"], [0, 1])
+    loaded = json.loads(meta_path.read_bytes())
+    assert loaded["transfer_id"] == "tid"
+    assert loaded["chunks_have"] == [0, 1]
