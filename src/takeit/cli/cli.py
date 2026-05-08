@@ -617,6 +617,14 @@ def _run_send(
             os.path.dirname(os.path.abspath(path)),
             f".{dir_name}.takeit-zip-{os.getpid()}",
         )
+        # HYP-433: track whether materialize_and_hash actually created the
+        # tmp zip. materialize_and_hash uses O_EXCL|O_NOFOLLOW so it
+        # REFUSES to write to a pre-existing path (HYP-407). If an
+        # attacker pre-created the predictable path, we must NOT unlink
+        # it in the finally block — that would let an attacker who
+        # writes to the source directory delete arbitrary files via this
+        # cleanup primitive.
+        tmp_zip_created = False
         try:
             size, content_hash, chunk_hashes = yield deferToThread(
                 Z.materialize_and_hash,
@@ -625,6 +633,7 @@ def _run_send(
                 chunk_size,
                 ignore_unsendable=ignore_unsendable,
             )
+            tmp_zip_created = True
             yield _do_send(
                 reactor,
                 tmp_zip_path,
@@ -648,10 +657,11 @@ def _run_send(
                 explicit_code_prevalidated=True,
             )
         finally:
-            try:
-                os.unlink(tmp_zip_path)
-            except FileNotFoundError:
-                pass
+            if tmp_zip_created:
+                try:
+                    os.unlink(tmp_zip_path)
+                except FileNotFoundError:
+                    pass
         return
 
     # File transfer: original path.
