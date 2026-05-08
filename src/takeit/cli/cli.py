@@ -740,7 +740,7 @@ def _run_send_text(
             _validate_code_before_takeit(explicit_code, verify)
         w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
         if explicit_code:
-            w.set_code(explicit_code)
+            _set_code_routed(w, explicit_code)
         else:
             # allocate_code always produces a canonical <locator>:<words>
             # code post-HYP-406, so no validation needed here.
@@ -814,7 +814,7 @@ def _do_send(
             _validate_code_before_takeit(explicit_code, verify)
         w = takeit.create(appid=APPID, reactor=reactor, relays=relays)
         if explicit_code:
-            w.set_code(explicit_code)
+            _set_code_routed(w, explicit_code)
         else:
             # allocate_code always produces a canonical <locator>:<words>
             # code post-HYP-406, so no validation needed here.
@@ -1120,6 +1120,21 @@ def _validate_code_before_takeit(code, verify):
     _validate_words_only_handoff(code, verify)
 
 
+def _set_code_routed(w, code):
+    """Route a validated code to the right takeit entrypoint based on
+    its shape (HYP-443).
+
+    Canonical `<locator>:<words>` codes go to `w.set_code`. Bare-words
+    codes go to `w.set_code_legacy_words` so the relay-MITM-vulnerable
+    path is syntactically conspicuous. Callers MUST have already run
+    `_validate_words_only_handoff` (so a bare-words code reaching here
+    implies `--verify` was passed)."""
+    if ":" in code:
+        w.set_code(code)
+    else:
+        w.set_code_legacy_words(code)
+
+
 # ---- Receive flow ----
 
 
@@ -1190,7 +1205,7 @@ def _run_receive(
             click.echo("On the sending machine, run:")
             click.echo(f"    takeit send --code {code} <file>")
         else:
-            w.set_code(code)
+            _set_code_routed(w, code)
 
         if verify:
             yield _confirm_verifier(w)

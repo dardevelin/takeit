@@ -157,11 +157,56 @@ def test_deferred_get_code_can_be_grabbed_before_allocate():
     assert isinstance(d.result, str)
 
 
-def test_set_code_path():
-    """set_code with a known code should fire get_code() immediately."""
+def test_set_code_canonical_path():
+    """set_code with a CANONICAL `<locator>:<words>` code should fire
+    get_code() immediately. This is the path library callers should
+    use; bare-words callers must use set_code_legacy_words explicitly
+    (HYP-443)."""
     eq, a, _ = _make_wormhole_pair()
-    a.set_code("purple-sausages-mocha")
+    canonical = "abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha"
+    a.set_code(canonical)
+    assert _resolve(eq, a.get_code()) == canonical
+
+
+def test_set_code_refuses_bare_words(_recorded=[]):
+    """HYP-443: passing a bare-words code (no `:` separator) to
+    set_code raises ValueError. The CLI's words-only flow must
+    explicitly route through set_code_legacy_words to make the
+    relay-MITM-vulnerable path syntactically conspicuous (per the
+    standing 'no easy paths' mandate). Library callers using
+    canonical codes see zero change."""
+    eq, a, _ = _make_wormhole_pair()
+    with pytest.raises(ValueError, match="canonical|legacy_words"):
+        a.set_code("purple-sausages-mocha")
+    # The session is still alive — the refusal happens BEFORE any
+    # state-machine commit, so the caller can still call
+    # set_code_legacy_words or set_code(canonical).
+    canonical = "abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha"
+    a.set_code(canonical)
+    assert _resolve(eq, a.get_code()) == canonical
+
+
+def test_set_code_legacy_words_path():
+    """HYP-443: set_code_legacy_words exists and accepts bare words.
+    Used by the CLI's words-only-with-verify flow and by library
+    callers that explicitly want to bridge to upstream wormhole's
+    words-only protocol shape. The function name mirrors
+    derive_tag_legacy_words to keep "legacy" loud."""
+    eq, a, _ = _make_wormhole_pair()
+    a.set_code_legacy_words("purple-sausages-mocha")
     assert _resolve(eq, a.get_code()) == "purple-sausages-mocha"
+
+
+def test_set_code_legacy_words_refuses_canonical():
+    """Symmetric refusal: canonical-shape codes must NOT enter the
+    legacy entrypoint. Otherwise a caller could accidentally route a
+    canonical code through derive_tag_legacy_words (which uses a
+    DIFFERENT HKDF salt domain), and the resulting tag would not match
+    what the peer derives via the canonical path."""
+    eq, a, _ = _make_wormhole_pair()
+    canonical = "abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha"
+    with pytest.raises(ValueError, match="canonical|set_code"):
+        a.set_code_legacy_words(canonical)
 
 
 # --- Delegated mode end-to-end ---

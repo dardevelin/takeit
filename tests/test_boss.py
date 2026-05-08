@@ -184,11 +184,12 @@ def test_set_code_twice_raises():
     eq, boss_a, _, _, _ = _make_paired_bosses()
     boss_a.start()
     _flush(eq)
-    boss_a.set_code("purple-sausages-mocha")
+    # Canonical shape; HYP-443's set_code refuses bare words.
+    boss_a.set_code("abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha")
     from takeit.errors import OnlyOneCodeError
 
     with pytest.raises(OnlyOneCodeError):
-        boss_a.set_code("yarn-loafer-stockman")
+        boss_a.set_code("zzzzzzzzzzzzzzzzzzzzzzzzzz:yarn-loafer-stockman")
 
 
 def test_invalid_code_format_raises():

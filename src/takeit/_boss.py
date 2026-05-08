@@ -204,11 +204,56 @@ class Boss:
         self._C.allocate_code(code_length, PGPWordList(), locator_b32=locator_b32)
 
     def set_code(self, code):
+        """Set a CANONICAL `<base32-locator>:<words>` code (HYP-443).
+
+        Bare-words codes are refused with ValueError; library callers
+        wanting the legacy oracle-vulnerable path must use
+        set_code_legacy_words() so that path is syntactically
+        conspicuous (per the standing 'no easy paths' mandate). The
+        CLI's words-only flow goes through the legacy entrypoint
+        only after --verify validation in cli.py.
+        """
         validate_code(code)  # raises KeyFormatError on bad format
+        if ":" not in code:
+            raise ValueError(
+                "set_code requires a canonical '<locator>:<words>' code. "
+                "For legacy words-only handoff (vulnerable to relay "
+                "MITM without out-of-band SAS comparison), use "
+                "set_code_legacy_words()."
+            )
         if self._did_start_code:
             raise OnlyOneCodeError()
         self._did_start_code = True
         self._C.set_code(code)
+
+    def set_code_legacy_words(self, words):
+        """Set a legacy words-only code (HYP-443).
+
+        Used by the CLI's words-only path AFTER --verify has gated it,
+        and by library callers explicitly bridging to upstream
+        wormhole's words-only protocol shape. The rendezvous tag is
+        derived from the words alone via derive_tag_legacy_words,
+        which means a hostile Nostr relay can pre-compute every
+        wordlist^N → tag mapping and mount an active MITM. Out-of-band
+        SAS comparison is the ONLY mitigation; callers MUST display
+        the verifier and have both peers compare it before exchanging
+        sensitive data.
+
+        Symmetrically refuses canonical-shape codes — those should
+        flow through set_code so the canonical HKDF salt is used.
+        """
+        validate_code(words)  # raises KeyFormatError on bad format
+        if ":" in words:
+            raise ValueError(
+                "set_code_legacy_words refuses canonical-shape codes. "
+                "Pass the canonical '<locator>:<words>' code to "
+                "set_code instead — it routes through a different "
+                "(non-oracle-vulnerable) HKDF path."
+            )
+        if self._did_start_code:
+            raise OnlyOneCodeError()
+        self._did_start_code = True
+        self._C.set_code(words)
 
     def dilate(
         self,

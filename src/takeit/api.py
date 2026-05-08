@@ -62,7 +62,16 @@ class _DelegatedWormhole:
         return self._boss.input_code()
 
     def set_code(self, code):
+        """Set a canonical '<locator>:<words>' code. See Boss.set_code
+        for the full HYP-443 contract; bare-words callers must use
+        set_code_legacy_words explicitly."""
         self._boss.set_code(code)
+
+    def set_code_legacy_words(self, words):
+        """Set a legacy words-only code. The rendezvous path is
+        vulnerable to active relay MITM; out-of-band SAS comparison
+        via the verifier is REQUIRED. See Boss.set_code_legacy_words."""
+        self._boss.set_code_legacy_words(words)
 
     def send_message(self, plaintext):
         self._boss.send(plaintext)
@@ -159,7 +168,16 @@ class _DeferredWormhole:
         return self._boss.input_code()
 
     def set_code(self, code):
+        """Set a canonical '<locator>:<words>' code. See Boss.set_code
+        for the full HYP-443 contract; bare-words callers must use
+        set_code_legacy_words explicitly."""
         self._boss.set_code(code)
+
+    def set_code_legacy_words(self, words):
+        """Set a legacy words-only code. The rendezvous path is
+        vulnerable to active relay MITM; out-of-band SAS comparison
+        via the verifier is REQUIRED. See Boss.set_code_legacy_words."""
+        self._boss.set_code_legacy_words(words)
 
     def send_message(self, plaintext):
         self._boss.send(plaintext)

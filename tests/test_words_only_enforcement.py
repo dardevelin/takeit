@@ -271,14 +271,16 @@ def test_set_code_without_validation_would_have_published():
         _rendezvous_factory=factory,
     )
 
-    # NO validation call — go straight to set_code with words-only.
-    # FakeRendezvous SHOULD see tx_open (proving the regression test
-    # above exercises a real "didn't publish" condition).
-    w.set_code("purple-sausages-mocha")
+    # NO validation call — go straight to set_code_legacy_words with
+    # bare words (post-HYP-443 set_code refuses bare words; the legacy
+    # entrypoint is the explicit bridge to words-only-wormhole protocol
+    # shape). FakeRendezvous SHOULD see tx_open (proving the regression
+    # test above exercises a real "didn't publish" condition).
+    w.set_code_legacy_words("purple-sausages-mocha")
     eq.flush_sync()
     assert rv_a.opened, (
-        "control test failed: set_code didn't trigger tx_open in "
-        "the fake. Either FakeRendezvous changed shape or the takeit session "
-        "doesn't publish on set_code anymore — the regression test "
-        "above is no longer load-bearing."
+        "control test failed: set_code_legacy_words didn't trigger "
+        "tx_open in the fake. Either FakeRendezvous changed shape or "
+        "the takeit session doesn't publish on set_code* anymore — "
+        "the regression test above is no longer load-bearing."
     )
