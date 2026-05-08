@@ -530,6 +530,64 @@ def test_materialize_creates_file_with_0o600_mode(tmp_path):
         os.umask(old_umask)
 
 
+# --- HYP-441: tmp-zip cleanup on mid-materialize failure ---
+
+
+def test_materialize_unlinks_tmp_on_mid_walk_failure(tmp_path, monkeypatch):
+    """If materialize_and_hash creates the tmp zip via O_EXCL|O_NOFOLLOW
+    and then fails partway through (e.g. one of the source files
+    becomes unreadable between walk and read), the function MUST
+    unlink the partial tmp file on its way out so plaintext source
+    material doesn't sit beside the source tree.
+
+    HYP-433's defense (don't unlink attacker-precreated paths) is
+    preserved because we only unlink when O_EXCL succeeded for us —
+    i.e. we know we created the file. An attacker-precreated path
+    fails O_EXCL before any state mutation, so the unlink path is
+    not reached.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"first" * 1000)
+    (src / "b.txt").write_bytes(b"second" * 1000)
+    out = tmp_path / "out.zip"
+
+    real_open = os.open
+    call_count = {"n": 0}
+
+    def flaky_open(path, flags, mode=0o777, **kwargs):
+        # Pass through tmp-zip O_CREAT|O_EXCL|O_NOFOLLOW so the file is
+        # actually created. Fail on a later O_RDONLY|O_NOFOLLOW open
+        # (the second source-file read).
+        if (flags & os.O_RDONLY == os.O_RDONLY) and (flags & os.O_NOFOLLOW):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise PermissionError("simulated mid-walk failure")
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    with pytest.raises(PermissionError):
+        materialize_and_hash(str(src), str(out), chunk_size=1 << 20)
+    # Tmp zip must NOT linger on disk after the failure.
+    assert not out.exists(), "tmp zip should have been unlinked on failure"
+
+
+def test_materialize_preserves_hyp_433_attacker_precreated_defense(tmp_path):
+    """Re-pin HYP-433: an attacker-precreated path causes O_EXCL to
+    raise BEFORE any state mutation. The HYP-441 cleanup path must
+    NOT unlink that pre-existing file (which we did not create)."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"hello")
+    out = tmp_path / "out.zip"
+    out.write_bytes(b"attacker-precreated")  # we did not create this
+    with pytest.raises(FileExistsError):
+        materialize_and_hash(str(src), str(out), chunk_size=1 << 20)
+    # The pre-existing content must be untouched: O_EXCL failed before
+    # any cleanup was reachable.
+    assert out.read_bytes() == b"attacker-precreated"
+
+
 # --- HYP-438: zip-bomb defenses (compress_type + central-dir totals) ---
 
 

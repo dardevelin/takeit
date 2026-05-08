@@ -227,30 +227,48 @@ def materialize_and_hash(root, out_path, chunk_size, *, ignore_unsendable=False)
     # symlink-to-target tricks), and pin 0o600 mode regardless of
     # umask (no world-readable confidentiality window). HYP-407,
     # audit #3.
+    #
+    # HYP-441 ownership invariant: O_EXCL guarantees the path either
+    # didn't exist (we just created it; we own cleanup) or already
+    # existed (we raised before any state mutation; we do NOT own
+    # cleanup — the caller / attacker did). The except path below
+    # unlinks the path WE created; an attacker-precreated path
+    # never reaches that path because os.open raised first.
     fd = os.open(
         out_path,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
         0o600,
     )
-    with os.fdopen(fd, "wb") as out:
-        for piece in deterministic_directory_zip(
-            root, ignore_unsendable=ignore_unsendable
-        ):
-            out.write(piece)
-            h_all.update(piece)
-            size += len(piece)
-            pending.extend(piece)
-            # Drain full chunks from `pending` into chunk_hashes. The
-            # generator's pieces are not chunk-aligned, so we accumulate.
-            while len(pending) >= chunk_size:
-                chunk = bytes(pending[:chunk_size])
-                chunk_hashes.append(hashlib.blake2b(chunk, digest_size=32).digest())
-                del pending[:chunk_size]
-        # Flush the trailing partial chunk (if any).
-        if pending:
-            chunk_hashes.append(
-                hashlib.blake2b(bytes(pending), digest_size=32).digest()
-            )
+    try:
+        with os.fdopen(fd, "wb") as out:
+            for piece in deterministic_directory_zip(
+                root, ignore_unsendable=ignore_unsendable
+            ):
+                out.write(piece)
+                h_all.update(piece)
+                size += len(piece)
+                pending.extend(piece)
+                # Drain full chunks from `pending` into chunk_hashes. The
+                # generator's pieces are not chunk-aligned, so we accumulate.
+                while len(pending) >= chunk_size:
+                    chunk = bytes(pending[:chunk_size])
+                    chunk_hashes.append(hashlib.blake2b(chunk, digest_size=32).digest())
+                    del pending[:chunk_size]
+            # Flush the trailing partial chunk (if any).
+            if pending:
+                chunk_hashes.append(
+                    hashlib.blake2b(bytes(pending), digest_size=32).digest()
+                )
+    except BaseException:
+        # HYP-441: we created out_path via O_EXCL; on failure (mid-walk
+        # IOError, KeyboardInterrupt, etc.) unlink it so plaintext
+        # source bytes don't sit beside the source tree. Don't mask
+        # the original exception with cleanup errors.
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+        raise
     return size, h_all.digest(), chunk_hashes
 
 

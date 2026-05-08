@@ -617,13 +617,18 @@ def _run_send(
             os.path.dirname(os.path.abspath(path)),
             f".{dir_name}.takeit-zip-{os.getpid()}",
         )
-        # HYP-433: track whether materialize_and_hash actually created the
-        # tmp zip. materialize_and_hash uses O_EXCL|O_NOFOLLOW so it
-        # REFUSES to write to a pre-existing path (HYP-407). If an
-        # attacker pre-created the predictable path, we must NOT unlink
-        # it in the finally block — that would let an attacker who
-        # writes to the source directory delete arbitrary files via this
-        # cleanup primitive.
+        # tmp_zip cleanup ownership:
+        # - HYP-433: if `materialize_and_hash` raises (e.g. attacker
+        #   pre-created the predictable path → O_EXCL fires), the flag
+        #   stays False, the finally below skips, and we don't unlink
+        #   a path we didn't create.
+        # - HYP-441: if `materialize_and_hash` fails MID-WRITE (after
+        #   it created the tmp via O_EXCL), it unlinks its own partial
+        #   itself before re-raising. Same flag-False outcome here.
+        # - If `_do_send` raises after `materialize_and_hash` returned,
+        #   the flag is True and finally unlinks the now-fully-written
+        #   tmp zip.
+        # - Happy path: flag True, finally unlinks.
         tmp_zip_created = False
         try:
             size, content_hash, chunk_hashes = yield deferToThread(
