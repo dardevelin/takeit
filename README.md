@@ -117,7 +117,7 @@ where the file is going, and the next attempt resumes from them.
 | `--code-length 4` (sender) | Use a 4-word code instead of 3. |
 | `--ignore-unsendable-files` (sender) | Skip unreadable entries during a directory transfer instead of erroring. |
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
-| `--allow-private-hints` (both) | Both publish our own LAN/CGNAT/VPN addresses to the peer AND allow connection attempts to peer-advertised private addresses. Off by default — when no public address is available, takeit relies on STUN. |
+| `--allow-private-hints` (both) | Bind the dilation listener to all interfaces, publish our own LAN/CGNAT/VPN addresses to the peer, AND allow connection attempts to peer-advertised private addresses. Off by default — the listener is bound only to public-facing interfaces (or loopback if no public address is available), and only public addresses are published. STUN-mediated transfers continue to work because STUN learns the public IP the kernel routes to a specific interface. |
 | `--stun-server HOST:PORT` (both) | Opt into STUN-derived public-IP hints. May be repeated. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |

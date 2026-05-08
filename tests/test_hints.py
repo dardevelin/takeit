@@ -280,6 +280,58 @@ def test_filter_listener_addresses_returns_empty_when_only_private():
     assert filtered == []
 
 
+# --- HYP-449: listener bind narrows when --allow-private-hints is off ---
+
+
+def test_listener_endpoint_string_all_interfaces_when_opted_in():
+    """When --allow-private-hints is on, the user has opted into
+    LAN P2P; bind all-interfaces so peers can reach the listener
+    via any published private hint."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=True)
+    addrs = ["192.168.1.20", "8.8.8.8"]
+    ep_string = Connector._listener_endpoint_string(fake, addrs)
+    assert ep_string == "tcp:0"
+
+
+def test_listener_endpoint_string_narrow_bind_when_off_with_public():
+    """When --allow-private-hints is off and a public addr is
+    available, bind to that specific interface so a LAN scanner
+    can't see a takeit listener.
+
+    "off means off" — pass-8's HYP-439 closed publication; HYP-449
+    closes the listener-bind side."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = ["192.168.1.20", "8.8.8.8"]
+    ep_string = Connector._listener_endpoint_string(fake, addrs)
+    # Format must be tcp:0:interface=<addr>; we don't pin which
+    # public addr is picked when there are several, just that ONE
+    # public addr is the bind target.
+    assert ep_string.startswith("tcp:0:interface=")
+    bound = ep_string[len("tcp:0:interface=") :]
+    assert bound == "8.8.8.8" or bound == "1.1.1.1" or bound in {"8.8.8.8"}
+    assert bound != "192.168.1.20"  # never bind to the private addr
+
+
+def test_listener_endpoint_string_loopback_fallback_when_off_no_public():
+    """When --allow-private-hints is off and the host has only
+    private addresses, bind to loopback. Transfer will only work
+    via STUN-mediated public-IP hints (or same-host loopback test
+    scenarios) — but at least the LAN can't see the listener."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    addrs = ["192.168.1.20", "10.0.0.5"]
+    ep_string = Connector._listener_endpoint_string(fake, addrs)
+    assert ep_string == "tcp:0:interface=127.0.0.1"
+
+
+def test_listener_endpoint_string_loopback_fallback_when_no_addrs():
+    """Edge case: empty addresses list (e.g. test host with only
+    127.0.0.1 stripped earlier in the pipeline). Fall back to
+    loopback, not all-interfaces."""
+    fake = _FakeConnectorForListenerFilter(allow_private_hints=False)
+    ep_string = Connector._listener_endpoint_string(fake, [])
+    assert ep_string == "tcp:0:interface=127.0.0.1"
+
+
 def test_filter_listener_addresses_keeps_unparseable():
     """Hostname or unrecognized literal — keep. We don't know what it
     is, so we don't strip it. The receiver-side validation in

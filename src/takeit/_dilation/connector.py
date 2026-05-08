@@ -346,11 +346,45 @@ class Connector:
             )
         return public
 
+    def _listener_endpoint_string(self, addresses):
+        """HYP-449: pick the bind target for the dilation listener.
+
+        When `--allow-private-hints` is on, the user has opted into
+        LAN P2P; bind all-interfaces so peers can reach the listener
+        via any published private hint.
+
+        When `--allow-private-hints` is off, "off means off" — bind
+        to a public-facing interface only so a LAN scanner can't see
+        a takeit listener during transfer. Picks the first public
+        address from the candidate list (matching `_filter_listener_
+        addresses`'s publication policy). If no public address is
+        available, fall back to loopback so the listener still binds
+        successfully but can't be reached from the LAN — STUN-
+        mediated public-IP hints, or same-host loopback test runs,
+        remain workable.
+        """
+        if self._allow_private_hints:
+            return "tcp:0"
+        import ipaddress
+
+        for addr in addresses:
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue  # skip unparseable
+            if not is_private_or_carrier_grade(ip) and not ip.is_loopback:
+                return f"tcp:0:interface={addr}"
+        # No public address available; bind to loopback. The listener
+        # exists but is not LAN-reachable — STUN-derived hints would
+        # need to point at this same host (degenerate case) or the
+        # transfer relies on the peer connecting to a different host.
+        return "tcp:0:interface=127.0.0.1"
+
     def _start_listener(self, addresses):
         # TODO: listen on a fixed port, if possible, for NAT/p2p benefits, also
         # to make firewall configs easier
         # TODO: retain listening port between connection generations?
-        ep = serverFromString(self._reactor, "tcp:0")
+        ep = serverFromString(self._reactor, self._listener_endpoint_string(addresses))
         f = InboundConnectionFactory(self)
         d = ep.listen(f)
 
