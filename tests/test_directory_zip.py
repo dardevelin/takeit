@@ -530,6 +530,122 @@ def test_materialize_creates_file_with_0o600_mode(tmp_path):
         os.umask(old_umask)
 
 
+# --- HYP-445: parent-component symlink TOCTOU on directory send ---
+
+
+def test_zip_stream_uses_openat_traversal_for_each_component(tmp_path):
+    """Each path component must get a fresh O_NOFOLLOW open via
+    dir_fd, so a parent-component symlink swap between walk and read
+    cannot redirect the open. We verify structurally: the zip's
+    per-file open path (in `deterministic_directory_zip` plus its
+    helpers) must include a `dir_fd=` argument somewhere, NOT a
+    bare absolute-path open."""
+    import inspect
+    import re
+
+    from takeit.cli import _zipstream as Z
+
+    # The opens may live in deterministic_directory_zip itself or in
+    # a helper it calls. Concatenate the module's source so the
+    # structural check tolerates either layout.
+    module_src = inspect.getsource(Z)
+    flat = re.sub(r"\s+", " ", module_src)
+    assert "dir_fd=" in flat, (
+        "_zipstream.py's per-file open path must use dir_fd= for "
+        "openat-style traversal so each path component gets fresh "
+        "O_NOFOLLOW protection. An absolute-path open re-introduces "
+        "the parent-symlink TOCTOU from HYP-445."
+    )
+    # And the bare absolute-path open in deterministic_directory_zip
+    # MUST be gone (modulo the root_fd open, which is the seed).
+    fn_src = inspect.getsource(Z.deterministic_directory_zip)
+    fn_flat = re.sub(r"\s+", " ", fn_src)
+    # The legacy bug was: os.open(full, os.O_RDONLY | os.O_NOFOLLOW).
+    # That call has 'full,' as the first arg (the per-entry absolute
+    # path). The new code uses dir_fd=root_fd (no 'full' as first arg).
+    assert "os.open(full," not in fn_flat, (
+        "deterministic_directory_zip must not open files by absolute "
+        "path; use dir_fd-relative opens for parent-symlink defense"
+    )
+
+
+def test_zip_stream_rejects_dev_ino_mismatch(tmp_path, monkeypatch):
+    """Belt-and-braces: even if openat traversal lets the swap
+    through (extreme race), the (dev, ino) cross-check between the
+    walk-time lstat and the open-time fstat catches the mismatch.
+
+    Simulate the mismatch by monkeypatching os.fstat to return an
+    altered identity for any regular-file fd. The walk-time lstat
+    captured the real (dev, ino); the read-time fstat returns
+    different values; deterministic_directory_zip must raise."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_bytes(b"hello")
+
+    real_fstat = os.fstat
+
+    class _LyingStat:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        @property
+        def st_dev(self):
+            return self._real.st_dev + 1  # mismatch vs walk-time
+
+        @property
+        def st_mode(self):
+            return self._real.st_mode
+
+        @property
+        def st_ino(self):
+            return self._real.st_ino
+
+        @property
+        def st_size(self):
+            return self._real.st_size
+
+    def lying_fstat(fd):
+        st = real_fstat(fd)
+        # Lie ONLY for regular files; directory fds (root_fd) keep
+        # their real dev so any internal directory checks pass.
+        if stat.S_ISREG(st.st_mode):
+            return _LyingStat(st)
+        return st
+
+    monkeypatch.setattr(os, "fstat", lying_fstat)
+    with pytest.raises(ValueError, match="changed identity|swap"):
+        list(deterministic_directory_zip(str(src)))
+
+
+def test_zip_stream_rejects_parent_directory_symlink_swap(tmp_path):
+    """Real race-simulation: walk_directory captures a sub/file.txt
+    entry. Before the per-file open fires, swap `sub` to point
+    elsewhere. The openat traversal MUST detect this via either:
+    (a) the relative open from root_fd raising ELOOP because
+        `sub` is now a symlink (O_NOFOLLOW under dir_fd), or
+    (b) the dev/ino cross-check failing.
+
+    We can't easily inject the swap mid-execution, so simulate by
+    pre-staging a tree where 'sub' is already a dangling symlink at
+    walk-time — walk refuses (existing HYP-417 behavior). The
+    structural test above pins the openat traversal that prevents
+    the live-race version of this attack."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sensitive.txt").write_bytes(b"victim")
+
+    src = tmp_path / "src"
+    src.mkdir()
+    # Pre-stage the malicious symlink: 'sub' points outside the root.
+    (src / "sub").symlink_to(outside)
+    # walk_directory refuses BEFORE the openat code runs (HYP-417).
+    with pytest.raises(ValueError, match="symlink"):
+        list(deterministic_directory_zip(str(src)))
+
+
 # --- HYP-441: tmp-zip cleanup on mid-materialize failure ---
 
 

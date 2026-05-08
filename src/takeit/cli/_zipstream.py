@@ -68,10 +68,30 @@ def walk_directory(root, *, ignore_unsendable=False):
     routinely-unreadable noise (e.g. `.git/objects/` owned by another
     UID, mounted volumes that disappear).
     """
+    return _walk_directory_internal(root, ignore_unsendable=ignore_unsendable)[:3]
+
+
+def _walk_directory_internal(root, *, ignore_unsendable=False):
+    """Same walk as `walk_directory`, but ALSO returns walk-time
+    (dev, ino) identity tuples per file so `deterministic_directory_zip`
+    can fstat-cross-check at open time (HYP-445).
+
+    Returns (paths, num_files, num_bytes, identities) where:
+    - paths: list[str] of absolute file paths
+    - num_files: len(paths)
+    - num_bytes: total st_size sum
+    - identities: list[tuple[int, int]] of (st_dev, st_ino) parallel
+      to paths.
+
+    The public `walk_directory` exists so existing callers and tests
+    that destructure the 3-tuple don't break; HYP-445's identity
+    capture is additive.
+    """
     root_real = os.path.realpath(root)
     if not os.path.isdir(root_real):
         raise ValueError(f"not a directory: {root!r}")
     files = []
+    identities = []
     num_bytes = 0
     for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
         # Sort in place so os.walk descends in deterministic order.
@@ -105,8 +125,9 @@ def walk_directory(root, *, ignore_unsendable=False):
                     continue
                 raise ValueError(f"not a regular file: {full!r}")
             files.append(full)
+            identities.append((st.st_dev, st.st_ino))
             num_bytes += st.st_size
-    return files, len(files), num_bytes
+    return files, len(files), num_bytes, identities
 
 
 class _StreamSink(io.RawIOBase):
@@ -160,8 +181,17 @@ def deterministic_directory_zip(root, *, ignore_unsendable=False):
     raised before any bytes are yielded — unless `ignore_unsendable=True`,
     which skips IO-failing entries with a stderr warning (privacy-failing
     symlinks still hard-refuse).
+
+    HYP-445 — parent-component symlink TOCTOU defense: each file is
+    opened via openat-style traversal from a single root_fd. Each
+    path component gets a fresh O_NOFOLLOW open so a parent-directory
+    symlink swap between walk and read raises ELOOP rather than
+    redirecting the read. As a belt-and-braces second layer, the
+    walk-time (st_dev, st_ino) is compared against the open-time
+    fstat — a mismatch (the file's identity changed during the
+    window) raises ValueError before any zip bytes are emitted.
     """
-    files, _num_files, _num_bytes = walk_directory(
+    files, _num_files, _num_bytes, identities = _walk_directory_internal(
         root, ignore_unsendable=ignore_unsendable
     )
     root_real = os.path.realpath(root)
@@ -169,19 +199,35 @@ def deterministic_directory_zip(root, *, ignore_unsendable=False):
     # allowZip64=True: future-proof against >4 GiB directories without
     # changing the wire format.
     zf = zipfile.ZipFile(sink, "w", allowZip64=True)
+    # Open the root once with O_NOFOLLOW|O_DIRECTORY. Every per-file
+    # open below is relative to this fd; an attacker swapping a
+    # parent component between walk and read can't redirect the
+    # traversal because each component is re-validated by O_NOFOLLOW
+    # at openat time.
+    root_fd = os.open(root_real, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
     try:
-        for full in files:
+        for full, (expected_dev, expected_ino) in zip(files, identities):
             rel = os.path.relpath(full, root_real)
             # Zip entry names are always forward-slash, regardless of OS.
             arcname = rel.replace(os.sep, "/")
             zinfo = zipfile.ZipInfo(arcname, date_time=_FIXED_MTIME)
             zinfo.compress_type = zipfile.ZIP_STORED
             zinfo.external_attr = _EXTERNAL_ATTR_FILE
-            fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = _open_relative_safely(root_fd, rel.split(os.sep))
             try:
                 st = os.fstat(fd)
                 if not stat.S_ISREG(st.st_mode):
                     raise ValueError(f"not a regular file: {full!r}")
+                # HYP-445: dev/ino cross-check. Parent-symlink swap
+                # is caught by openat traversal; this catches the
+                # tightest race (swap-and-swap-back during the
+                # traversal) plus catches a final-component swap
+                # against a different file with the same path.
+                if st.st_dev != expected_dev or st.st_ino != expected_ino:
+                    raise ValueError(
+                        f"file {full!r} changed identity between walk "
+                        f"and read (parent-component symlink swap?)"
+                    )
                 src = os.fdopen(fd, "rb")
                 fd = None
                 with src:
@@ -198,7 +244,41 @@ def deterministic_directory_zip(root, *, ignore_unsendable=False):
             yield from sink.drain()
     finally:
         zf.close()
+        os.close(root_fd)
     yield from sink.drain()
+
+
+def _open_relative_safely(root_fd, components):
+    """Walk `components` (list of basename strings) under `root_fd`,
+    opening each level with O_NOFOLLOW.
+
+    Each intermediate component is opened relative to its parent's
+    fd, so a parent-component symlink swap between walk and read
+    raises ELOOP at the offending level — closes the parent-symlink
+    TOCTOU that absolute-path O_NOFOLLOW cannot defend against.
+
+    The returned fd points at the LAST component; intermediate
+    fds are closed as we descend. Caller owns closing the returned
+    fd.
+    """
+    parent_fd = root_fd
+    parent_owned = False  # we never close root_fd; caller owns it
+    try:
+        for i, name in enumerate(components):
+            is_last = i == len(components) - 1
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            if not is_last:
+                flags |= os.O_DIRECTORY
+            fd = os.open(name, flags, dir_fd=parent_fd)
+            if parent_owned:
+                os.close(parent_fd)
+            parent_fd = fd
+            parent_owned = True
+        return parent_fd
+    except BaseException:
+        if parent_owned:
+            os.close(parent_fd)
+        raise
 
 
 def materialize_and_hash(root, out_path, chunk_size, *, ignore_unsendable=False):
