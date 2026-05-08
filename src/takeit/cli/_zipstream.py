@@ -254,15 +254,33 @@ def materialize_and_hash(root, out_path, chunk_size, *, ignore_unsendable=False)
     return size, h_all.digest(), chunk_hashes
 
 
-def extract_zip_safely(blob_or_file, dest):
-    """Extract a zip blob/file into `dest`, defending against zip-slip
-    and symlink footguns.
+def extract_zip_safely(blob_or_file, dest, *, num_files=None, num_bytes=None):
+    """Extract a zip blob/file into `dest`, defending against zip-slip,
+    symlink footguns, and zip-bomb attempts.
 
     `blob_or_file` may be bytes, a BytesIO, or any seekable file-like.
     `dest` must already exist and be a directory; entries are extracted
     into it. Subdirectories are created as needed.
 
-    Defenses:
+    `num_files` / `num_bytes` (HYP-438): if both are passed, they MUST
+    equal the central directory's totals (file-entry count and the sum
+    of `file_size` across non-directory entries). Mismatch raises
+    before any write. Receiver call sites pass these from the offer to
+    promote them from advisory-UX to enforced-bound. Library callers
+    that don't have an offer can omit them; the format invariants
+    below still fire.
+
+    Format invariants always enforced (HYP-438), independent of the
+    totals kwargs:
+    - Every entry's `compress_type` must be `ZIP_STORED`. Takeit-
+      issued archives are STORED-only by spec; a DEFLATED entry on
+      the wire is either a sender bug or a zip-bomb attempt (small
+      compressed offer, hash matches, expands large during read).
+    - For STORED entries, `compress_size` must equal `file_size`. A
+      mismatch is corrupt or forged; the central directory's
+      `file_size` is what bounds the read.
+
+    Defenses (existing):
     - Each entry's filename is resolved against `realpath(dest)`; if
       the resolved path doesn't fall within dest, the extract is
       aborted with ValueError before any disk write happens.
@@ -287,7 +305,26 @@ def extract_zip_safely(blob_or_file, dest):
         # file fragments on disk.
         targets = set()
         entries = []
+        cd_file_count = 0
+        cd_byte_total = 0
         for zinfo in zf.infolist():
+            # HYP-438: format invariants. Run before path/symlink
+            # validation because a wrong compress_type is a stronger
+            # rejection signal than a path issue (the latter could be
+            # ambiguous across OSes; this is a flat protocol violation).
+            if zinfo.compress_type != zipfile.ZIP_STORED:
+                raise ValueError(
+                    f"zip entry uses non-stored compression "
+                    f"({zinfo.filename!r}, compress_type="
+                    f"{zinfo.compress_type}); takeit archives are "
+                    f"ZIP_STORED-only"
+                )
+            if not zinfo.is_dir() and zinfo.compress_size != zinfo.file_size:
+                raise ValueError(
+                    f"stored zip entry has compress_size "
+                    f"{zinfo.compress_size} != file_size "
+                    f"{zinfo.file_size} ({zinfo.filename!r})"
+                )
             target = _validate_zinfo(zinfo, dest_real)
             if target in targets:
                 raise ValueError(f"duplicate zip entry target: {zinfo.filename!r}")
@@ -306,6 +343,24 @@ def extract_zip_safely(blob_or_file, dest):
                 raise ValueError(
                     f"zip entry target already exists ({zinfo.filename!r}); refusing"
                 )
+            if not zinfo.is_dir():
+                cd_file_count += 1
+                cd_byte_total += zinfo.file_size
+
+        # HYP-438: enforce offer-stated totals against the central
+        # directory. Mirrors the consent prompt the user already saw
+        # ("12 files, 4 MiB"); a sender lying here would expand the
+        # transfer past what the user agreed to.
+        if num_files is not None and cd_file_count != num_files:
+            raise ValueError(
+                f"zip num_files mismatch: central directory has "
+                f"{cd_file_count}, offer claimed {num_files}"
+            )
+        if num_bytes is not None and cd_byte_total != num_bytes:
+            raise ValueError(
+                f"zip num_bytes mismatch: central directory totals "
+                f"{cd_byte_total}, offer claimed {num_bytes}"
+            )
         for zinfo in zf.infolist():
             target = _safe_target_path(zinfo.filename, dest_real)
             if zinfo.is_dir():

@@ -1423,7 +1423,16 @@ def _run_receive(
                 dir=parent_real,
             )
             try:
-                yield deferToThread(Z.extract_zip_safely, partial_path, extract_tmp)
+                # HYP-438: thread the offer's num_files/num_bytes into
+                # the extractor so the central directory's totals are
+                # bound by the consent prompt, not just advisory.
+                yield deferToThread(
+                    Z.extract_zip_safely,
+                    partial_path,
+                    extract_tmp,
+                    num_files=offer["num_files"],
+                    num_bytes=offer["num_bytes"],
+                )
                 # TOCTOU-safe atomic rename. os.rename refuses on Linux
                 # if dest_path is a non-empty directory, but on macOS it
                 # may overwrite — the lstat pre-check + this re-check

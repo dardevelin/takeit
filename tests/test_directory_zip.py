@@ -528,3 +528,160 @@ def test_materialize_creates_file_with_0o600_mode(tmp_path):
         assert stat.S_IMODE(st.st_mode) == 0o600
     finally:
         os.umask(old_umask)
+
+
+# --- HYP-438: zip-bomb defenses (compress_type + central-dir totals) ---
+
+
+def _build_zip(entries, *, compress_type=zipfile.ZIP_STORED):
+    """Build an in-memory zip from a {arcname: bytes} dict using the
+    given compression. Used to forge zips that takeit's sender would
+    never produce, so the extractor's defenses can be exercised."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=compress_type) as zf:
+        for arcname, content in entries.items():
+            zi = zipfile.ZipInfo(arcname, date_time=(1980, 1, 1, 0, 0, 0))
+            zi.compress_type = compress_type
+            zi.external_attr = 0o600 << 16
+            zf.writestr(zi, content)
+    buf.seek(0)
+    return buf
+
+
+def test_extract_zip_safely_rejects_deflated_entry_before_writing(tmp_path):
+    """The takeit sender writes ZIP_STORED only. A peer offering a zip
+    with a DEFLATED entry is either buggy or hostile (zip-bomb attempt:
+    compressed offer hashed truthfully, expands to N× bytes on the
+    receiver during zf.open(...).read()). Refuse before any file write.
+    """
+    bad = _build_zip({"a.txt": b"x" * 100_000}, compress_type=zipfile.ZIP_DEFLATED)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(ValueError, match="ZIP_STORED|compress_type|stored"):
+        extract_zip_safely(bad, str(dest))
+    # No file was written before the raise.
+    assert sorted(p.name for p in dest.iterdir()) == []
+
+
+def test_extract_zip_safely_enforces_num_files_mismatch(tmp_path):
+    """The directory offer's num_files is now an enforced bound, not
+    advisory: an attacker who puts more entries in the zip than the
+    consent prompt showed has the extract refused."""
+    blob = _build_zip({"a.txt": b"a", "b.txt": b"b"})
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    # Offer claimed 1 file; zip carries 2.
+    with pytest.raises(ValueError, match="num_files"):
+        extract_zip_safely(blob, str(dest), num_files=1, num_bytes=1)
+    assert sorted(p.name for p in dest.iterdir()) == []
+
+
+def test_extract_zip_safely_enforces_num_bytes_mismatch(tmp_path):
+    """Offer-stated num_bytes (uncompressed source-tree total) must
+    equal the sum of file_size across STORED entries. A mismatch is
+    a sender lying about the consent prompt."""
+    blob = _build_zip({"a.txt": b"hello"})  # 5 bytes
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(ValueError, match="num_bytes"):
+        extract_zip_safely(blob, str(dest), num_files=1, num_bytes=42)
+    assert sorted(p.name for p in dest.iterdir()) == []
+
+
+def test_extract_zip_safely_accepts_matching_totals(tmp_path):
+    """The happy path: a legitimate sender zip whose central directory
+    totals match the offer extracts cleanly."""
+    blob = _build_zip({"a.txt": b"hi", "sub/b.txt": b"there"})
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    extract_zip_safely(
+        blob,
+        str(dest),
+        num_files=2,
+        num_bytes=len(b"hi") + len(b"there"),
+    )
+    assert (dest / "a.txt").read_bytes() == b"hi"
+    assert (dest / "sub" / "b.txt").read_bytes() == b"there"
+
+
+def test_extract_zip_safely_rejects_stored_with_size_mismatch(tmp_path):
+    """Defense-in-depth invariant: for ZIP_STORED entries,
+    compress_size MUST equal file_size. A zip that violates this is
+    either corrupt or forged; refuse rather than risk the
+    file_size-bounded read writing more bytes than the central
+    directory advertised.
+
+    Forge by hand-building a ZipInfo with file_size != compress_size.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zi = zipfile.ZipInfo("a.txt", date_time=(1980, 1, 1, 0, 0, 0))
+        zi.compress_type = zipfile.ZIP_STORED
+        zi.external_attr = 0o600 << 16
+        zf.writestr(zi, b"x" * 5)
+    # Patch the central-directory file_size to 999 (lying about
+    # uncompressed size while the on-disk content is 5).
+    raw = bytearray(buf.getvalue())
+    # The central directory entry signature is b"\x50\x4b\x01\x02".
+    cd_off = raw.find(b"\x50\x4b\x01\x02")
+    assert cd_off != -1
+    # Within the central-dir header: at offset 24 lives the
+    # 4-byte little-endian uncompressed size. Patch it.
+    import struct as _struct
+
+    _struct.pack_into("<I", raw, cd_off + 24, 999)
+    blob = io.BytesIO(bytes(raw))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    # Don't pass num_files/num_bytes — exercises the inline invariant
+    # directly.
+    with pytest.raises(ValueError, match="file_size|compress_size|stored"):
+        extract_zip_safely(blob, str(dest))
+    assert sorted(p.name for p in dest.iterdir()) == []
+
+
+def test_extract_zip_safely_back_compat_no_totals_kwarg(tmp_path):
+    """Callers (tests, library users) that don't pass num_files/num_bytes
+    skip total enforcement but STILL get the compress_type +
+    file_size==compress_size invariants. Existing tests in this file
+    rely on this default."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _materialize(src, {"a.txt": b"hello"})
+    blob = b"".join(deterministic_directory_zip(str(src)))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    extract_zip_safely(io.BytesIO(blob), str(dest))  # no totals kwargs
+    assert (dest / "a.txt").read_bytes() == b"hello"
+
+
+def test_receiver_call_site_passes_totals_to_extract():
+    """Pin that cli.py's _run_receive directory branch threads the
+    offer's num_files/num_bytes into extract_zip_safely. Without this,
+    the defense is dormant — same shape as the HYP-413 → HYP-437
+    'wired but not activated' regression we caught last pass.
+
+    The cli call site is wrapped in deferToThread(Z.extract_zip_safely,
+    ...args..., num_files=..., num_bytes=...), so we look for the
+    extract reference followed by both kwargs in the same containing
+    call. Whitespace-normalized so ruff-format wrapping choices don't
+    bind us (per feedback_no_brittle_format_assertions)."""
+    import inspect
+    import re
+
+    from takeit.cli import cli as _cli
+
+    src = inspect.getsource(_cli)
+    flat = re.sub(r"\s+", " ", src)
+    assert "Z.extract_zip_safely" in flat
+    # Look for `extract_zip_safely` followed (within a reasonable
+    # window of the same enclosing call) by both kwargs. The window
+    # rules out a coincidence elsewhere in the file.
+    window_pattern = re.compile(
+        r"Z\.extract_zip_safely[^)]{0,400}?"
+        r"(num_files\s*=[^)]*?num_bytes\s*=|num_bytes\s*=[^)]*?num_files\s*=)"
+    )
+    assert window_pattern.search(flat), (
+        "expected the extract_zip_safely call to receive "
+        "num_files=... and num_bytes=... from the offer; HYP-438"
+    )
