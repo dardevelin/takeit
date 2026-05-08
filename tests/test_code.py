@@ -157,6 +157,12 @@ def test_allocate_code_generates_locally_and_notifies():
     assert key.codes == [code]
 
 
+def test_allocate_code_rejects_one_word_code():
+    c, _, _, _ = _wired_code()
+    with pytest.raises(ValueError, match="length must be >= 2"):
+        c.allocate_code(1, PGPWordList())
+
+
 def test_allocate_code_uses_caller_provided_wordlist():
     """The wordlist must be respected so a future i18n wordlist works."""
 

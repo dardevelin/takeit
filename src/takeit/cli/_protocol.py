@@ -71,11 +71,11 @@ MAX_CHUNK_COUNT = 1 << 20  # ~1M chunks (with 1 MiB chunks → 1 TiB)
 # UTF-8 bytes ≤ 255 to be portable.
 MAX_FILENAME_BYTES = 255
 
-# Cap on inline text-mode payload. Text rides inside the takeit control
-# message (one app-message), not the bulk subchannel. 64 KiB is well under
-# every reasonable framing limit and keeps memory bounded against a peer
-# that crafts a hostile offer.
-MAX_TEXT_BYTES = 1 << 16  # 64 KiB
+# Cap on inline text-mode payload. Text rides inside one takeit control
+# message, then JSON and SecretBox overhead are added before the Nostr
+# rendezvous sees it. Keep the plaintext cap below the rendezvous 64 KiB
+# decoded-body cap so a max-size legal text offer is still deliverable.
+MAX_TEXT_BYTES = 60 * 1024
 
 # Cap on subchannel-header body length (length-prefixed JSON between
 # sender and receiver before chunk frames). MAX_CHUNK_COUNT × 32-byte

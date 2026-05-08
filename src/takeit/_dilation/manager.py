@@ -291,6 +291,8 @@ class Manager:
     _expected_subprotocols = attrib()
     # TODO: can this validator work when the parameter is optional?
     _no_listen = attrib(validator=instance_of(bool), default=False)
+    _allow_private_hints = attrib(validator=instance_of(bool), default=False)
+    _stun_servers = attrib(default=())
     _status = attrib(default=None)  # callable([DilationStatus])
     _initial_mailbox_status = attrib(default=None)  # WormholeStatus
 
@@ -406,11 +408,11 @@ class Manager:
         self.start()
 
     # from _boss.Boss
-    def _takeit_status(self, takeit_status):
+    def _wormhole_status(self, wormhole_status):
         self._maybe_send_status(
             evolve(
                 self._latest_status,
-                mailbox=takeit_status,
+                mailbox=wormhole_status,
             )
         )
 
@@ -786,6 +788,7 @@ class Manager:
             self._timing,
             self._my_side,  # needed for relay handshake
             self._my_role,
+            self._stun_servers,
         )
         if self._debug_stall_connector:
             # unit tests use this hook to send messages while we know we
@@ -806,9 +809,18 @@ class Manager:
 
     @m.output()
     def use_hints(self, hint_message):
+        # Extracted as a regular method so tests can exercise the
+        # filtering logic without going through Automat (which forbids
+        # direct calls to @m.output() methods).
+        self._use_hints(hint_message)
+
+    def _use_hints(self, hint_message):
         hint_objs = filter(
             lambda h: h,  # ignore None, unrecognizable
-            [parse_hint(hs) for hs in hint_message["hints"]],
+            [
+                parse_hint(hs, allow_private=self._allow_private_hints)
+                for hs in hint_message["hints"]
+            ],
         )
         hint_objs = list(hint_objs)
         self._connector.got_hints(hint_objs)
@@ -1011,10 +1023,12 @@ class Dilator:
         self,
         transit_relay_location=None,
         no_listen=False,
-        takeit_status=None,
+        wormhole_status=None,
         status_update=None,
         ping_interval=None,
         expected_subprotocols=None,
+        allow_private_hints=False,
+        stun_servers=(),
     ):
         # ensure users can only call this API once -- in the past, it
         # was possible to call the API more than once but any cal
@@ -1038,8 +1052,10 @@ class Dilator:
                 ping_interval or 30.0,
                 expected_subprotocols,
                 no_listen,
+                allow_private_hints,
+                stun_servers,
                 status_update,
-                initial_mailbox_status=takeit_status,
+                initial_mailbox_status=wormhole_status,
             )
             self._manager = m
             if self._pending_dilation_key is not None:

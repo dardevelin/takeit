@@ -3,6 +3,7 @@ import math
 import pytest
 
 from takeit._dilation.connector import Connector
+from takeit._dilation.manager import Manager
 from takeit._hints import DirectTCPV1Hint, TorTCPV1Hint, parse_hint, parse_tcp_v1_hint
 
 
@@ -24,9 +25,18 @@ def _tor(hostname="example.onion", port=1234, priority=0.0):
     }
 
 
-def test_parse_direct_hint_accepts_private_ip_literal():
-    hint = parse_tcp_v1_hint(_direct())
+def test_parse_direct_hint_rejects_private_ip_literal_by_default():
+    assert parse_tcp_v1_hint(_direct()) is None
+
+
+def test_parse_direct_hint_accepts_private_ip_literal_when_opted_in():
+    hint = parse_tcp_v1_hint(_direct(), allow_private=True)
     assert hint == DirectTCPV1Hint("192.168.1.20", 1234, 0.0)
+
+
+def test_parse_direct_hint_accepts_public_ip_literal_by_default():
+    hint = parse_tcp_v1_hint(_direct("8.8.8.8"))
+    assert hint == DirectTCPV1Hint("8.8.8.8", 1234, 0.0)
 
 
 def test_parse_tor_hint_allows_hostname():
@@ -57,16 +67,27 @@ def test_parse_hint_rejects_invalid_priority(priority):
         "::",
         "224.0.0.1",
         "ff02::1",
-        "169.254.1.2",
-        "fe80::1",
     ],
 )
 def test_parse_direct_hint_rejects_nonliteral_or_unsafe_addresses(hostname):
     assert parse_tcp_v1_hint(_direct(hostname=hostname)) is None
 
 
+@pytest.mark.parametrize("hostname", ["169.254.1.2", "fe80::1"])
+def test_parse_direct_hint_rejects_link_local_even_when_private_opted_in(hostname):
+    assert parse_tcp_v1_hint(_direct(hostname=hostname), allow_private=True) is None
+
+
 def test_parse_relay_hint_rejects_non_list_hints():
     assert parse_hint({"type": "relay-v1", "hints": "not a list"}) is None
+
+
+def test_parse_relay_hint_honors_private_opt_in():
+    relay = {"type": "relay-v1", "hints": [_direct()]}
+    assert parse_hint(relay).hints == []
+    assert parse_hint(relay, allow_private=True).hints == [
+        DirectTCPV1Hint("192.168.1.20", 1234, 0.0)
+    ]
 
 
 class _FakeManager:
@@ -90,6 +111,32 @@ class _FakeConnector:
         return True
 
 
+class _HintsSink:
+    def __init__(self):
+        self.hints = None
+
+    def got_hints(self, hints):
+        self.hints = hints
+
+
+class _FakeManagerForParsing:
+    def __init__(self, allow_private_hints):
+        self._allow_private_hints = allow_private_hints
+        self._connector = _HintsSink()
+
+
+def test_manager_filters_private_peer_hints_by_default():
+    fake = _FakeManagerForParsing(allow_private_hints=False)
+    Manager._use_hints(fake, {"hints": [_direct(), _direct("8.8.8.8")]})
+    assert fake._connector.hints == [DirectTCPV1Hint("8.8.8.8", 1234, 0.0)]
+
+
+def test_manager_allows_private_peer_hints_when_opted_in():
+    fake = _FakeManagerForParsing(allow_private_hints=True)
+    Manager._use_hints(fake, {"hints": [_direct()]})
+    assert fake._connector.hints == [DirectTCPV1Hint("192.168.1.20", 1234, 0.0)]
+
+
 def test_connector_caps_scheduled_peer_hints():
     fake = _FakeConnector()
     hints = [
@@ -100,3 +147,12 @@ def test_connector_caps_scheduled_peer_hints():
     assert len(fake.scheduled) == Connector.MAX_DIRECT_HINTS
     assert len(fake._manager.statuses) == 1
     assert len(fake._manager.statuses[0]) == Connector.MAX_DIRECT_HINTS
+
+
+class _NoStunConnector:
+    _stun_servers = ()
+
+
+def test_connector_skips_stun_when_no_servers_configured():
+    # Should return before importing/using the STUN implementation.
+    assert Connector._gather_stun_hints(_NoStunConnector(), 1234) is None

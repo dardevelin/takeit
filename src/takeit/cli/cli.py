@@ -24,7 +24,7 @@ from twisted.internet.threads import deferToThread
 from twisted.python import log
 
 import takeit
-from takeit._code import validate_code
+from takeit._code import MIN_CODE_WORDS, validate_code
 from takeit._code_format import parse_code
 from takeit.cli import _protocol as P
 from takeit.cli import _resume as R
@@ -191,6 +191,22 @@ def _resolve_output_target(output_file, sender_name):
     return parent, os.path.basename(target)
 
 
+def _parse_stun_servers(values):
+    servers = []
+    for value in values:
+        host, sep, port_s = value.rpartition(":")
+        if not sep or not host:
+            raise click.UsageError("--stun-server must be HOST:PORT")
+        try:
+            port = int(port_s)
+        except ValueError:
+            raise click.UsageError("--stun-server port must be an integer")
+        if not (1 <= port <= 65535):
+            raise click.UsageError("--stun-server port must be between 1 and 65535")
+        servers.append((host, port))
+    return tuple(servers)
+
+
 # ---- Click commands ----
 
 
@@ -222,7 +238,7 @@ def main(ctx, debug):
 )
 @click.option(
     "--code-length",
-    type=int,
+    type=click.IntRange(min=MIN_CODE_WORDS),
     default=3,
     help="Number of words in the generated code (default: 3).",
 )
@@ -231,6 +247,18 @@ def main(ctx, debug):
     "relays",
     multiple=True,
     help="Override Nostr relay URLs (may be repeated).",
+)
+@click.option(
+    "--allow-private-hints",
+    is_flag=True,
+    default=False,
+    help="Allow dilation to connect to peer-advertised private LAN IP hints.",
+)
+@click.option(
+    "--stun-server",
+    "stun_servers",
+    multiple=True,
+    help="Opt into a STUN server for public-IP hints, as HOST:PORT.",
 )
 @click.option(
     "--code",
@@ -283,6 +311,8 @@ def cmd_send(
     text_input,
     code_length,
     relays,
+    allow_private_hints,
+    stun_servers,
     explicit_code,
     no_cache,
     qr,
@@ -301,6 +331,7 @@ def cmd_send(
     if text_input is None and path is None:
         raise click.UsageError("Provide a path or --text")
     relay_list = list(relays) if relays else None
+    stun_server_list = _parse_stun_servers(stun_servers)
     debug = ctx.obj.get("debug", False)
     if text_input is not None:
         # Read from stdin if the value is "-".
@@ -332,6 +363,8 @@ def cmd_send(
             path,
             code_length,
             relay_list,
+            allow_private_hints,
+            stun_server_list,
             explicit_code,
             not no_cache,
             qr,
@@ -357,6 +390,18 @@ def cmd_send(
     "relays",
     multiple=True,
     help="Override Nostr relay URLs (may be repeated).",
+)
+@click.option(
+    "--allow-private-hints",
+    is_flag=True,
+    default=False,
+    help="Allow dilation to connect to peer-advertised private LAN IP hints.",
+)
+@click.option(
+    "--stun-server",
+    "stun_servers",
+    multiple=True,
+    help="Opt into a STUN server for public-IP hints, as HOST:PORT.",
 )
 @click.option(
     "-o",
@@ -407,7 +452,7 @@ def cmd_send(
 @click.option(
     "--code-length",
     "code_length",
-    type=int,
+    type=click.IntRange(min=MIN_CODE_WORDS),
     default=None,
     help="Number of words in the code (only meaningful with --allocate; default 3).",
 )
@@ -417,6 +462,8 @@ def cmd_receive(
     code,
     auto_accept,
     relays,
+    allow_private_hints,
+    stun_servers,
     output_file,
     verify,
     hide_progress,
@@ -445,12 +492,15 @@ def cmd_receive(
     if code_length is None:
         code_length = 3  # match cmd_send's default
     relay_list = list(relays) if relays else None
+    stun_server_list = _parse_stun_servers(stun_servers)
     react(
         _run_receive,
         (
             code,
             auto_accept,
             relay_list,
+            allow_private_hints,
+            stun_server_list,
             output_file,
             verify,
             hide_progress,
@@ -529,6 +579,8 @@ def _run_send(
     path,
     code_length,
     relays,
+    allow_private_hints,
+    stun_servers,
     explicit_code,
     use_cache,
     qr,
@@ -583,6 +635,8 @@ def _run_send(
                 chunk_size,
                 code_length,
                 relays,
+                allow_private_hints,
+                stun_servers,
                 explicit_code,
                 qr,
                 verify,
@@ -639,6 +693,8 @@ def _run_send(
         chunk_size,
         code_length,
         relays,
+        allow_private_hints,
+        stun_servers,
         explicit_code,
         qr,
         verify,
@@ -721,6 +777,8 @@ def _do_send(
     chunk_size,
     code_length,
     relays,
+    allow_private_hints,
+    stun_servers,
     explicit_code,
     qr,
     verify,
@@ -793,7 +851,10 @@ def _do_send(
         spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
-            dw = w.dilate()
+            dw = w.dilate(
+                allow_private_hints=allow_private_hints,
+                stun_servers=stun_servers,
+            )
             yield dw.when_dilated()
             ep = dw.connector_for(P.SUBCHANNEL_NAME)
         finally:
@@ -1048,6 +1109,8 @@ def _run_receive(
     code,
     auto_accept,
     relays,
+    allow_private_hints,
+    stun_servers,
     output_file,
     verify,
     hide_progress,
@@ -1279,7 +1342,10 @@ def _run_receive(
         spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
-            dw = w.dilate()
+            dw = w.dilate(
+                allow_private_hints=allow_private_hints,
+                stun_servers=stun_servers,
+            )
             yield dw.when_dilated()
             listener_ep = dw.listener_for(P.SUBCHANNEL_NAME)
         finally:

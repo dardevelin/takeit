@@ -7,6 +7,8 @@ from ._automat import first as _first
 from .errors import KeyFormatError
 from .util import provides
 
+MIN_CODE_WORDS = 2
+
 
 def validate_code(code):
     """A takeit code is a hyphen-separated sequence of words, e.g.
@@ -87,8 +89,8 @@ class Code:
         Synchronous: by the time this returns, `B.got_code` and `K.got_code`
         have been called.
         """
-        if length < 1:
-            raise ValueError("length must be >= 1")
+        if length < MIN_CODE_WORDS:
+            raise ValueError(f"length must be >= {MIN_CODE_WORDS}")
         words = wordlist.choose_words(length)
         code = f"{locator_b32}:{words}" if locator_b32 else words
         self._set_code(code)

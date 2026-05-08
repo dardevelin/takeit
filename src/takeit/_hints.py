@@ -63,7 +63,7 @@ def endpoint_from_hint_obj(hint, tor, reactor):
     return None
 
 
-def parse_tcp_v1_hint(hint):  # hint_struct -> hint_obj
+def parse_tcp_v1_hint(hint, *, allow_private=False):  # hint_struct -> hint_obj
     hint_type = hint.get("type", "")
     if hint_type not in ["direct-tcp-v1", "tor-tcp-v1"]:
         log.msg(f"unknown hint type: {hint!r}")
@@ -96,12 +96,15 @@ def parse_tcp_v1_hint(hint):  # hint_struct -> hint_obj
         if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local:
             log.msg(f"unsafe direct hint address: {hint!r}")
             return None
+        if ip.is_private and not allow_private:
+            log.msg(f"private direct hint address requires opt-in: {hint!r}")
+            return None
         return DirectTCPV1Hint(str(ip), hint["port"], float(priority))
     else:
         return TorTCPV1Hint(hint["hostname"], hint["port"], float(priority))
 
 
-def parse_hint(hint_struct):
+def parse_hint(hint_struct, *, allow_private=False):
     hint_type = hint_struct.get("type", "")
     if hint_type == "relay-v1":
         # the struct can include multiple ways to reach the same relay
@@ -110,10 +113,13 @@ def parse_hint(hint_struct):
             return None
         rhints = filter(
             lambda h: h,  # drop None (unrecognized)
-            [parse_tcp_v1_hint(rh) for rh in hint_struct["hints"]],
+            [
+                parse_tcp_v1_hint(rh, allow_private=allow_private)
+                for rh in hint_struct["hints"]
+            ],
         )
         return RelayV1Hint(list(rhints))
-    return parse_tcp_v1_hint(hint_struct)
+    return parse_tcp_v1_hint(hint_struct, allow_private=allow_private)
 
 
 def encode_hint(h):

@@ -34,6 +34,20 @@ def test_receive_has_code_length_flag():
     assert "--code-length" in result.output
 
 
+def test_receive_has_allow_private_hints_flag():
+    runner = CliRunner()
+    result = runner.invoke(cmd_receive, ["--help"])
+    assert result.exit_code == 0
+    assert "--allow-private-hints" in result.output
+
+
+def test_receive_has_stun_server_flag():
+    runner = CliRunner()
+    result = runner.invoke(cmd_receive, ["--help"])
+    assert result.exit_code == 0
+    assert "--stun-server" in result.output
+
+
 # --- mutual exclusion ---
 
 
@@ -56,6 +70,13 @@ def test_code_length_without_allocate_is_usage_error():
     result = runner.invoke(cmd_receive, ["--code-length", "4"])
     assert result.exit_code != 0
     assert "allocate" in result.output.lower() or "Usage" in result.output
+
+
+def test_receive_allocate_rejects_one_word_code_length():
+    runner = CliRunner()
+    result = runner.invoke(cmd_receive, ["--allocate", "--code-length", "1"])
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output
 
 
 # --- orchestration: receiver-allocates calls allocate_code, NOT input/set_code ---

@@ -48,3 +48,20 @@ def test_all_receive_aliases_share_options():
     for name in ("receive", "rx", "recv", "recieve"):
         out = _help_text_for(name)
         assert "--allocate" in out, f"`{name}` doesn't expose --allocate"
+
+
+def test_send_exposes_allow_private_hints_flag():
+    out = _help_text_for("send")
+    assert "--allow-private-hints" in out
+
+
+def test_send_exposes_stun_server_flag():
+    out = _help_text_for("send")
+    assert "--stun-server" in out
+
+
+def test_send_rejects_one_word_code_length():
+    runner = CliRunner()
+    result = runner.invoke(main, ["send", "--code-length", "1", "--text", "hi"])
+    assert result.exit_code != 0
+    assert "Invalid value" in result.output

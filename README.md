@@ -117,6 +117,8 @@ where the file is going, and the next attempt resumes from them.
 | `--code-length 4` (sender) | Use a 4-word code instead of 3. |
 | `--ignore-unsendable-files` (sender) | Skip unreadable entries during a directory transfer instead of erroring. |
 | `--verify` (both) | Show a short authentication string and pause to compare out-of-band. |
+| `--allow-private-hints` (both) | Allow direct connection attempts to peer-advertised private LAN IPs. Off by default. |
+| `--stun-server HOST:PORT` (both) | Opt into STUN-derived public-IP hints. May be repeated. |
 | `-y` / `--accept` (receiver) | Skip the "accept this?" prompt. |
 | `-o` / `--output-file PATH` (receiver) | Save somewhere else. Existing dir → save into it; non-existing path → rename-on-receive. |
 | `-a` / `--allocate` (receiver) | Receiver picks the code; sender uses `--code <code>`. |
@@ -150,8 +152,9 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
   takeit code. Someone watching the network sees ciphertext.
 - **Wrong code → no transfer.** A bad guess fails immediately and
   closes the connection. Brute-force isn't practical.
-- **Your filename and file size are also encrypted** — the relays we
-  use to find each other never see them.
+- **Your filename, file size, and inline text are plaintext-confidential** —
+  relays do not get the decrypted values. They can still infer metadata
+  from ciphertext length, phase tags, event count, and timing.
 - **Want to be extra sure?** Pass `--verify` on both sides. takeit
   shows a short authentication string after the code is exchanged;
   read it out loud and the receiver checks it matches before any
@@ -159,10 +162,13 @@ takeit completion fish > ~/.config/fish/completions/takeit.fish
 
 A few honest limits:
 
-- Relays can see network metadata: client IPs, timing, subscriptions,
-  and publishes on a takeit-style tag. They do not see the file bytes,
-  filename, file size, or inline text. Peers can also see direct
-  connection hints such as LAN or public IP candidates.
+- This is private transfer, not anonymous transfer. Public Nostr relays
+  see client IPs, timing, subscriptions, phase tags, event counts, and
+  ciphertext lengths on a takeit-style tag. They do not see decrypted file
+  bytes, filenames, file sizes, or inline text.
+- Peers can see direct connection hints you choose to advertise. Private
+  LAN hint connections require `--allow-private-hints`; STUN-derived
+  public-IP hints require explicit `--stun-server HOST:PORT`.
 - If both you and the receiver are behind tricky network setups
   (corporate firewalls, mobile carrier-grade NAT), the direct connection
   may fail — there's no fallback to "send through us." Try from a
@@ -217,9 +223,11 @@ Delegate-mode sessions, `dilate()` for bulk-data subchannels,
    events, using the full code as the PAKE input, producing a shared
    secret. In legacy words-only mode, the words-only string is the PAKE
    input and `--verify` is mandatory.
-4. They exchange direct connection candidates (LAN addresses +
-   STUN-derived public IPs) and open a direct, **Noise**-encrypted,
-   multiplexed TCP connection.
+4. They exchange direct connection candidates and open a direct,
+   **Noise**-encrypted, multiplexed TCP connection. Private LAN
+   candidates and STUN-derived public-IP candidates are opt-in because
+   they reveal network location to the peer and, for STUN, to the STUN
+   operator.
 5. The file streams chunk-by-chunk over that direct connection. Every
    chunk is hash-verified on arrival; the whole file is hash-verified
    before the atomic rename into place.
@@ -264,7 +272,8 @@ resume logic, security defenses, and CLI behavior. See
   and compare the authentication string out-of-band. Without that, a
   hostile Nostr relay could intercept the transfer.
 - **NAT traversal is direct-only.** Symmetric NATs without a
-  port-forward will fail; no transit-relay fallback.
+  port-forward will fail; no transit-relay fallback. STUN-derived
+  public-IP hints are opt-in via `--stun-server HOST:PORT`.
 
 ### Contributing
 

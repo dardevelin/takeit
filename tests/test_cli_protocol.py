@@ -14,6 +14,8 @@ import struct
 
 import pytest
 
+from takeit._key import encrypt_data
+from takeit._rendezvous_nostr import MAX_INBOUND_EVENT_CONTENT_BYTES
 from takeit.cli._protocol import (
     DEFAULT_CHUNK_SIZE,
     MAX_CHUNK_COUNT,
@@ -796,6 +798,12 @@ def test_build_offer_text_accepts_at_max():
     msg = build_offer_text(fn)
     parsed = parse_offer(encode_message(msg))
     assert parsed["text"] == fn
+
+
+def test_text_offer_at_max_fits_rendezvous_inbound_cap():
+    payload = encode_message(build_offer_text("x" * MAX_TEXT_BYTES))
+    encrypted = encrypt_data(b"\x00" * 32, payload)
+    assert len(encrypted) <= MAX_INBOUND_EVENT_CONTENT_BYTES
 
 
 def test_parse_offer_text_rejects_oversized():

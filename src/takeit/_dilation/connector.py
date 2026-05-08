@@ -86,15 +86,17 @@ class Connector:
     _side = attrib(validator=instance_of(str))
     # was self._side = bytes_to_hexstr(os.urandom(8)) # unicode
     _role = attrib()
+    _stun_servers = attrib(default=())
 
     m = MethodicalMachine()
     set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
     RELAY_DELAY = 2.0
 
-    # Public STUN servers used to discover our reflexive (public) IP. These
-    # are stateless: they reply with "the public address I see you coming
-    # from" and do not relay any data. Override per-connector if needed.
+    # Public STUN servers callers may opt into to discover the reflexive
+    # (public) IP. These are stateless: they reply with "the public address I
+    # see you coming from" and do not relay any data. The Connector default is
+    # empty to avoid contacting third parties unless explicitly configured.
     DEFAULT_STUN_SERVERS = (
         ("stun.l.google.com", 19302),
         ("stun.cloudflare.com", 3478),
@@ -121,6 +123,7 @@ class Connector:
         )  # Protocols to be stopped
         self._contenders = set()  # viable connections
         self._winning_connection = None
+        self._stun_servers = tuple(self._stun_servers or ())
         self._timing = self._timing or DebugTiming()
         self._timing.add("transit")
 
@@ -328,6 +331,9 @@ class Connector:
         limitation the upstream project pushes into the transit relay, which
         takeit deliberately doesn't have.
         """
+        if not self._stun_servers:
+            return
+
         from ._stun import discover_reflexive_address
 
         seen = set()  # dedupe across multiple STUN servers reporting same IP
@@ -347,7 +353,7 @@ class Connector:
             log.msg(f"takeit STUN: {failure.value}")
             return None
 
-        for host, port in self.DEFAULT_STUN_SERVERS:
+        for host, port in self._stun_servers:
             d = discover_reflexive_address(
                 self._reactor, host, port, timeout=self.STUN_TIMEOUT
             )
