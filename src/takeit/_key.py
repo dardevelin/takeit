@@ -10,6 +10,7 @@ from spake2 import SPAKE2_Symmetric
 from zope.interface import implementer
 
 from . import _interfaces
+from ._rendezvous_nostr import MAX_INBOUND_EVENT_CONTENT_BYTES
 from .util import (
     HKDF,
     bytes_to_dict,
@@ -47,66 +48,48 @@ def derive_phase_key(key, side, phase):
 
 # HYP-426: ciphertext padding to fixed-length buckets.
 #
-# Threat: SecretBox is length-preserving. A relay observing the
-# base64-encoded event content can read off `len(plaintext) + 40`
-# (40 = nonce + auth tag) bytes and infer plaintext size. For the
-# inline-text phase that leaks a precise message size; for control
-# phases it leaks protocol-shape information.
-#
-# Mitigation: before encrypting, prepend a 4-byte big-endian length
-# prefix and right-pad with zeros to the next bucket size. All events
-# in a bucket produce identical ciphertext sizes, so the relay only
-# learns which bucket — short / medium / large / max — the plaintext
-# fell into.
-#
-# Bucket sizes were chosen so:
-# - The smallest covers all known control phases (`pake`, `version`,
-#   `dilate-N`) which are typically <200 bytes.
-# - The largest plus SecretBox overhead (40 bytes) fits under
-#   `_rendezvous_nostr.MAX_INBOUND_EVENT_CONTENT_BYTES` (64 KiB) so a
-#   max-size legal event still passes the inbound cap.
-# - Boundaries are powers of 2 (256 / 4096 / 16384) where they fit;
-#   the largest is hand-tuned to maximize bucket use within the cap.
-PADDING_LENGTH_PREFIX_BYTES = 4
-PADDING_BUCKETS = (256, 4096, 16384, 65496)
+# Bucket sizes were chosen so the smallest covers all known control
+# phases (typical pake/version/dilate-N <200 bytes) and the largest is
+# DERIVED from the rendezvous inbound cap minus SecretBox overhead, so
+# the largest legal ciphertext still passes the inbound size check no
+# matter what libsodium decides about overhead in the future.
+_PADDING_LENGTH_PREFIX_BYTES = 4
+_SECRETBOX_OVERHEAD = SecretBox.NONCE_SIZE + SecretBox.MACBYTES
+_MAX_PADDED_PLAINTEXT = MAX_INBOUND_EVENT_CONTENT_BYTES - _SECRETBOX_OVERHEAD
+_PADDING_BUCKETS = (256, 4096, 16384, _MAX_PADDED_PLAINTEXT)
 
 
 def _pad_to_bucket(plaintext):
-    """Prepend a 4-byte length prefix and right-pad with zeros to the
-    next bucket >= the framed length. Raises ValueError if no bucket
-    is large enough (caller must respect MAX_TEXT_BYTES at the layer
-    above)."""
-    framed_len = PADDING_LENGTH_PREFIX_BYTES + len(plaintext)
-    bucket = None
-    for b in PADDING_BUCKETS:
-        if b >= framed_len:
-            bucket = b
-            break
+    """Frame `plaintext` as `<4-byte big-endian length><plaintext><zeros>`
+    padded up to the smallest bucket that fits. Raises ValueError if no
+    bucket is large enough."""
+    framed_len = _PADDING_LENGTH_PREFIX_BYTES + len(plaintext)
+    bucket = next((b for b in _PADDING_BUCKETS if b >= framed_len), None)
     if bucket is None:
         raise ValueError(
             f"plaintext of {len(plaintext)} bytes exceeds largest padding "
-            f"bucket ({PADDING_BUCKETS[-1] - PADDING_LENGTH_PREFIX_BYTES})"
+            f"bucket ({_PADDING_BUCKETS[-1] - _PADDING_LENGTH_PREFIX_BYTES})"
         )
-    prefix = len(plaintext).to_bytes(PADDING_LENGTH_PREFIX_BYTES, "big")
-    pad = b"\x00" * (bucket - framed_len)
-    return prefix + plaintext + pad
+    prefix = len(plaintext).to_bytes(_PADDING_LENGTH_PREFIX_BYTES, "big")
+    return b"".join((prefix, plaintext, bytes(bucket - framed_len)))
 
 
 def _unpad_bucket(padded):
-    """Inverse of `_pad_to_bucket`. Reads the 4-byte length prefix and
-    returns the original plaintext. Raises ValueError if the prefix
-    declares more bytes than the padded payload could hold (a malformed
-    or attacker-forged ciphertext that decrypted-but-shouldn't-have)."""
-    if len(padded) < PADDING_LENGTH_PREFIX_BYTES:
+    """Inverse of `_pad_to_bucket`. Raises ValueError if the prefix
+    declares more bytes than the padded payload could hold (a forged
+    ciphertext that decrypted-but-shouldn't-have). The explicit bound
+    check matters: a Python slice would silently truncate to whatever
+    bytes happen to be present, masking the corruption."""
+    if len(padded) < _PADDING_LENGTH_PREFIX_BYTES:
         raise ValueError("padded payload too short for length prefix")
-    declared = int.from_bytes(padded[:PADDING_LENGTH_PREFIX_BYTES], "big")
-    payload = padded[PADDING_LENGTH_PREFIX_BYTES:]
-    if declared > len(payload):
+    declared = int.from_bytes(padded[:_PADDING_LENGTH_PREFIX_BYTES], "big")
+    end = _PADDING_LENGTH_PREFIX_BYTES + declared
+    if end > len(padded):
         raise ValueError(
             f"padded length prefix declares {declared} bytes but "
-            f"payload has only {len(payload)}"
+            f"payload has only {len(padded) - _PADDING_LENGTH_PREFIX_BYTES}"
         )
-    return payload[:declared]
+    return padded[_PADDING_LENGTH_PREFIX_BYTES:end]
 
 
 def decrypt_data(key, encrypted):

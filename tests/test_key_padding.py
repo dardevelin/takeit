@@ -22,8 +22,8 @@ import pytest
 from nacl.exceptions import CryptoError
 
 from takeit._key import (
-    PADDING_BUCKETS,
-    PADDING_LENGTH_PREFIX_BYTES,
+    _PADDING_BUCKETS,
+    _PADDING_LENGTH_PREFIX_BYTES,
     decrypt_data,
     encrypt_data,
 )
@@ -46,17 +46,17 @@ def test_round_trip_empty_message():
 def test_round_trip_at_each_bucket_boundary():
     # Each bucket size minus the length prefix is the largest plaintext
     # that fits in that bucket without spilling into the next.
-    for bucket in PADDING_BUCKETS:
-        plaintext = b"x" * (bucket - PADDING_LENGTH_PREFIX_BYTES)
+    for bucket in _PADDING_BUCKETS:
+        plaintext = b"x" * (bucket - _PADDING_LENGTH_PREFIX_BYTES)
         ct = encrypt_data(KEY, plaintext)
         assert decrypt_data(KEY, ct) == plaintext
 
 
 def test_round_trip_one_byte_short_of_each_bucket():
-    for bucket in PADDING_BUCKETS:
-        if bucket == PADDING_BUCKETS[0]:
+    for bucket in _PADDING_BUCKETS:
+        if bucket == _PADDING_BUCKETS[0]:
             continue  # "one short" doesn't fit a smaller plaintext
-        plaintext = b"x" * (bucket - PADDING_LENGTH_PREFIX_BYTES - 1)
+        plaintext = b"x" * (bucket - _PADDING_LENGTH_PREFIX_BYTES - 1)
         ct = encrypt_data(KEY, plaintext)
         assert decrypt_data(KEY, ct) == plaintext
 
@@ -80,7 +80,7 @@ def test_ciphertext_length_jumps_at_bucket_boundary():
     """Crossing a bucket boundary jumps the ciphertext to the next
     bucket size. This is the size leak that's left — the relay can
     distinguish 'small' from 'medium' from 'large', but no more."""
-    sizes = [PADDING_BUCKETS[0] // 2, PADDING_BUCKETS[1] // 2]
+    sizes = [_PADDING_BUCKETS[0] // 2, _PADDING_BUCKETS[1] // 2]
     cts = [encrypt_data(KEY, b"x" * s) for s in sizes]
     assert len(cts[0]) < len(cts[1])
 
@@ -94,7 +94,7 @@ def test_ciphertext_length_at_smallest_bucket_for_each_distinct_short_size():
         b"x",
         b"x" * 50,
         b"x" * 100,
-        b"x" * (PADDING_BUCKETS[0] - PADDING_LENGTH_PREFIX_BYTES),
+        b"x" * (_PADDING_BUCKETS[0] - _PADDING_LENGTH_PREFIX_BYTES),
     ]
     cts = [encrypt_data(KEY, s) for s in samples]
     sizes = {len(c) for c in cts}
@@ -104,7 +104,7 @@ def test_ciphertext_length_at_smallest_bucket_for_each_distinct_short_size():
 def test_too_large_plaintext_rejected():
     """Plaintexts larger than the largest bucket cannot be padded; we
     refuse rather than silently corrupt."""
-    too_big = b"x" * (PADDING_BUCKETS[-1] - PADDING_LENGTH_PREFIX_BYTES + 1)
+    too_big = b"x" * (_PADDING_BUCKETS[-1] - _PADDING_LENGTH_PREFIX_BYTES + 1)
     with pytest.raises(ValueError, match="exceeds largest padding bucket"):
         encrypt_data(KEY, too_big)
 
@@ -128,8 +128,8 @@ def test_decrypt_rejects_bad_length_prefix():
     box = SecretBox(KEY)
     # Forge a padded payload claiming length 999 inside a 256-byte
     # bucket. The receiver should refuse.
-    bogus_padded = (999).to_bytes(PADDING_LENGTH_PREFIX_BYTES, "big") + b"\x00" * (
-        PADDING_BUCKETS[0] - PADDING_LENGTH_PREFIX_BYTES
+    bogus_padded = (999).to_bytes(_PADDING_LENGTH_PREFIX_BYTES, "big") + b"\x00" * (
+        _PADDING_BUCKETS[0] - _PADDING_LENGTH_PREFIX_BYTES
     )
     nonce = utils.random(SecretBox.NONCE_SIZE)
     ct = box.encrypt(bogus_padded, nonce)
@@ -141,15 +141,17 @@ def test_padding_buckets_monotonic_and_under_rendezvous_cap():
     """Buckets must be strictly increasing so bucket selection is
     well-defined, and the largest bucket plus SecretBox overhead must
     fit inside the rendezvous inbound cap (64 KiB)."""
+    from nacl.secret import SecretBox
+
     from takeit._rendezvous_nostr import MAX_INBOUND_EVENT_CONTENT_BYTES
 
-    assert list(PADDING_BUCKETS) == sorted(PADDING_BUCKETS)
-    assert all(a < b for a, b in zip(PADDING_BUCKETS, PADDING_BUCKETS[1:]))
-    SECRETBOX_OVERHEAD = 24 + 16  # nonce + auth tag
-    largest_ciphertext = PADDING_BUCKETS[-1] + SECRETBOX_OVERHEAD
+    assert list(_PADDING_BUCKETS) == sorted(_PADDING_BUCKETS)
+    assert all(a < b for a, b in zip(_PADDING_BUCKETS, _PADDING_BUCKETS[1:]))
+    secretbox_overhead = SecretBox.NONCE_SIZE + SecretBox.MACBYTES
+    largest_ciphertext = _PADDING_BUCKETS[-1] + secretbox_overhead
     assert largest_ciphertext <= MAX_INBOUND_EVENT_CONTENT_BYTES, (
-        f"largest bucket ({PADDING_BUCKETS[-1]}) + SecretBox overhead "
-        f"({SECRETBOX_OVERHEAD}) = {largest_ciphertext} exceeds rendezvous cap "
+        f"largest bucket ({_PADDING_BUCKETS[-1]}) + SecretBox overhead "
+        f"({secretbox_overhead}) = {largest_ciphertext} exceeds rendezvous cap "
         f"({MAX_INBOUND_EVENT_CONTENT_BYTES})"
     )
 
@@ -162,9 +164,9 @@ def test_padding_buckets_cover_text_payload():
     # Worst-case JSON wrapper around a max text + transfer_id + kind:
     # ~120 bytes of overhead is generous.
     JSON_OVERHEAD = 256
-    needed = MAX_TEXT_BYTES + JSON_OVERHEAD + PADDING_LENGTH_PREFIX_BYTES
-    assert PADDING_BUCKETS[-1] >= needed, (
-        f"largest bucket ({PADDING_BUCKETS[-1]}) cannot hold a max-size "
+    needed = MAX_TEXT_BYTES + JSON_OVERHEAD + _PADDING_LENGTH_PREFIX_BYTES
+    assert _PADDING_BUCKETS[-1] >= needed, (
+        f"largest bucket ({_PADDING_BUCKETS[-1]}) cannot hold a max-size "
         f"text payload (need {needed})"
     )
 
