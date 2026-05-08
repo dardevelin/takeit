@@ -733,8 +733,14 @@ def _run_send_text(
     debug,
 ):
     """Send a text message inline. The offer IS the payload — no
-    chunked stream, no dilation. Same accept/decline gate as files
-    so the receiver still gets to consent before the text appears."""
+    chunked stream, no dilation. Per takeit's typing-is-consent rule
+    (the receiver's KIND_TEXT branch in `_run_receive` accepts as
+    soon as the offer parses, mirroring upstream wormhole), there is
+    NO y/N prompt for text: typing the code is the consent.
+    Terminal control characters in the received text are sanitized
+    by `_escape_terminal_text` (HYP-414) so an authenticated peer
+    cannot move the cursor, clear the screen, or spoof shell
+    output. Text payload size is capped at MAX_TEXT_BYTES."""
     try:
         if explicit_code:
             _validate_code_before_takeit(explicit_code, verify)
