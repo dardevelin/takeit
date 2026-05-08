@@ -21,9 +21,10 @@ class Receive:
     def __attrs_post_init__(self):
         self._key = None
 
-    def wire(self, boss, send):
+    def wire(self, boss, send, mailbox):
         self._B = _interfaces.IBoss(boss)
         self._S = _interfaces.ISend(send)
+        self._M = _interfaces.IMailbox(mailbox)
 
     @m.state(initial=True)
     def S0_unknown_key(self):
@@ -43,6 +44,11 @@ class Receive:
 
     # from Ordering
     def got_message(self, side, phase, body):
+        # HYP-423: a hostile relay can publish forged events on any
+        # phase. A forged message will fail decrypt_data with
+        # CryptoError; we report that to Mailbox so the slot is cleared
+        # and the next inbound for the same phase is forwarded again.
+        # The real peer's encrypted message eventually lands.
         assert isinstance(side, str), type(phase)
         assert isinstance(phase, str), type(phase)
         assert isinstance(body, bytes), type(body)
@@ -51,8 +57,12 @@ class Receive:
         try:
             plaintext = decrypt_data(data_key, body)
         except CryptoError:
+            self._M.peer_message_not_authenticated(phase)
             self.got_message_bad()
             return
+        # Auth success: tell Mailbox so the phase moves to processed
+        # and the redrain side-effect fires.
+        self._M.peer_message_authenticated(phase)
         self.got_message_good(phase, plaintext)
 
     @m.input()
@@ -101,8 +111,11 @@ class Receive:
         enter=S2_verified_key,
         outputs=[S_got_verified_key, W_happy, W_got_verifier, W_got_message],
     )
-    S1_unverified_key.upon(got_message_bad, enter=S3_scared, outputs=[W_scared])
-    S2_verified_key.upon(got_message_bad, enter=S3_scared, outputs=[W_scared])
+    # HYP-423: a bad relay-injected ciphertext does not prove a wrong
+    # code. It only proves this event failed authentication, so keep the
+    # Receive state live for the real peer's later event.
+    S1_unverified_key.upon(got_message_bad, enter=S1_unverified_key, outputs=[])
+    S2_verified_key.upon(got_message_bad, enter=S2_verified_key, outputs=[])
     S2_verified_key.upon(
         got_message_good, enter=S2_verified_key, outputs=[W_got_message]
     )

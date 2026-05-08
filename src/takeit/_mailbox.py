@@ -37,6 +37,11 @@ class Mailbox:
         self._tag = None
         self._mood = None
         self._pending_outbound = {}
+        # Phases we have forwarded to Order but whose auth verdict has
+        # not come back yet. Tracked so a relay-injected forged event
+        # cannot consume the slot before the real peer's event arrives.
+        # See HYP-423.
+        self._pending_phases = {}
         self._processed = set()
 
     def wire(self, rendezvous_connector, ordering, terminator):
@@ -170,26 +175,64 @@ class Mailbox:
 
     @m.output()
     def accept_peer_message_and_redrain(self, side, phase, body):
-        # On Nostr the relay does not buffer ephemeral events — if a peer
-        # subscribes after we publish, they never see our message. So when
-        # we *first* hear from the peer (one event per phase), we redrain
-        # the outbound queue so any of our pending messages get a fresh
-        # chance to land while the peer is demonstrably subscribed.
-        # Subsequent duplicates of the same peer phase are ignored by the
-        # `_processed` dedup, which also stops the redrain feedback loop.
-        # Cap `_processed` so a malicious peer flooding distinct phases
-        # cannot grow our memory or amplify our PoW-mined outbound past
-        # MAX_PROCESSED_PHASES redrains per session. Past the cap we still
-        # forward unseen messages to Order (they're legitimate-looking),
-        # but we do NOT redrain or grow `_processed`.
-        if len(self._processed) >= self.MAX_PROCESSED_PHASES:
-            if phase not in self._processed:
-                self._O.got_message(side, phase, body)
+        # HYP-423: a relay can publish forged events on our tag. We
+        # forward the FIRST event per phase to Order (so Key/Receive can
+        # try to decrypt) and ALSO redrain our pending_outbound so the
+        # peer sees our prior publishes (Nostr doesn't buffer ephemeral
+        # events; this proves the peer is now subscribed). We do NOT
+        # mark the phase processed yet — that happens only after
+        # Order/Key/Receive's auth verdict comes back via
+        # peer_message_authenticated() / peer_message_not_authenticated().
+        # On auth-fail we clear the pending slot so the next inbound on
+        # the same phase will be forwarded again, eventually delivering
+        # the real peer's event.
+        #
+        # Subsequent inbounds while a phase is pending OR already
+        # processed are dropped (legitimate dedup; a real paired peer
+        # publishes each phase exactly once).
+        if phase in self._processed or phase in self._pending_phases:
             return
-        if phase not in self._processed:
-            self._processed.add(phase)
+        # Bound memory + drain side-effects against a phase-flooding
+        # relay: past MAX_PROCESSED_PHASES distinct phases per session
+        # we stop parking and stop amplifying outbound. New phases past
+        # the cap are still forwarded to Order (so a real peer sending
+        # legitimately-named phases late doesn't starve), but we do
+        # NOT redrain or grow `_pending_phases`. Legitimate sessions
+        # need only a handful (`pake`, `version`, plus a few app
+        # phases), so 64 is generous.
+        seen = len(self._processed) + len(self._pending_phases)
+        if seen < self.MAX_PROCESSED_PHASES:
+            self._pending_phases[phase] = (side, body)
             self._drain()
-            self._O.got_message(side, phase, body)
+        self._O.got_message(side, phase, body)
+
+    @m.input()
+    def peer_message_authenticated(self, phase):
+        pass
+
+    @m.input()
+    def peer_message_not_authenticated(self, phase):
+        pass
+
+    @m.output()
+    def _accept_peer_message(self, phase):
+        # Auth verdict arrived: this phase is real. Clear pending,
+        # mark processed, redrain outbound.
+        self._pending_phases.pop(phase, None)
+        if phase in self._processed:
+            return  # idempotent (e.g. double-callback)
+        if len(self._processed) >= self.MAX_PROCESSED_PHASES:
+            return  # bounded; ignore further redrain effects
+        self._processed.add(phase)
+        self._drain()
+
+    @m.output()
+    def _ignore_peer_message(self, phase):
+        # Auth verdict: this phase failed to decrypt/authenticate.
+        # Clear pending so the next inbound on this phase will be
+        # re-forwarded. Do NOT mark processed (that would let the
+        # forged event consume the slot, which is the bug HYP-423 fixes).
+        self._pending_phases.pop(phase, None)
 
     @m.output()
     def RC_tx_close(self):
@@ -242,18 +285,31 @@ class Mailbox:
     S2A.upon(connected, enter=S2B, outputs=[RC_tx_open, drain])
     S2A.upon(add_message, enter=S2A, outputs=[queue])
     S2A.upon(close, enter=S3A, outputs=[record_mood])
+    # Auth callbacks may arrive while disconnected (Receive's decrypt
+    # is synchronous; Mailbox may have already transitioned to S2A on
+    # `lost`). Keep them safe no-ops on the connection-state side, but
+    # still update the pending/processed bookkeeping so a reconnect
+    # picks up where we left off.
+    S2A.upon(peer_message_authenticated, enter=S2A, outputs=[_accept_peer_message])
+    S2A.upon(peer_message_not_authenticated, enter=S2A, outputs=[_ignore_peer_message])
     S2B.upon(lost, enter=S2A, outputs=[])
     S2B.upon(add_message, enter=S2B, outputs=[queue, RC_tx_add])
     S2B.upon(rx_message_theirs, enter=S2B, outputs=[accept_peer_message_and_redrain])
     S2B.upon(rx_message_ours, enter=S2B, outputs=[noop_on_self_echo])
+    S2B.upon(peer_message_authenticated, enter=S2B, outputs=[_accept_peer_message])
+    S2B.upon(peer_message_not_authenticated, enter=S2B, outputs=[_ignore_peer_message])
     S2B.upon(close, enter=S3B, outputs=[record_mood_and_RC_tx_close])
 
     S3A.upon(connected, enter=S3B, outputs=[RC_tx_close])
+    S3A.upon(peer_message_authenticated, enter=S3A, outputs=[])
+    S3A.upon(peer_message_not_authenticated, enter=S3A, outputs=[])
     S3B.upon(lost, enter=S3A, outputs=[])
     S3B.upon(rx_closed, enter=S4B, outputs=[T_mailbox_done])
     S3B.upon(add_message, enter=S3B, outputs=[])
     S3B.upon(rx_message_theirs, enter=S3B, outputs=[])
     S3B.upon(rx_message_ours, enter=S3B, outputs=[])
+    S3B.upon(peer_message_authenticated, enter=S3B, outputs=[])
+    S3B.upon(peer_message_not_authenticated, enter=S3B, outputs=[])
     S3B.upon(close, enter=S3B, outputs=[])
 
     S4A.upon(connected, enter=S4B, outputs=[])
@@ -261,4 +317,6 @@ class Mailbox:
     S4.upon(add_message, enter=S4, outputs=[])
     S4.upon(rx_message_theirs, enter=S4, outputs=[])
     S4.upon(rx_message_ours, enter=S4, outputs=[])
+    S4.upon(peer_message_authenticated, enter=S4, outputs=[])
+    S4.upon(peer_message_not_authenticated, enter=S4, outputs=[])
     S4.upon(close, enter=S4, outputs=[])

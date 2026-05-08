@@ -29,7 +29,12 @@ class Order:
     def S0_no_pake(self):
         pass  # pragma: no cover
 
-    @m.state(terminal=True)
+    # HYP-423: under a hostile relay, a got_pake may be a forged event
+    # that Key cannot finish SPAKE2 against. We stay in S0_no_pake
+    # (queueing non-pake events) and only transition once Key signals
+    # pake_confirmed. That way a forged pake does not let a later
+    # encrypted message be delivered to a key-less Receive.
+    @m.state()
     def S1_yes_pake(self):
         pass  # pragma: no cover
 
@@ -51,6 +56,12 @@ class Order:
     def got_non_pake(self, side, phase, body):
         pass
 
+    @m.input()
+    def pake_confirmed(self):
+        # Called by Key after a successful SPAKE2.finish. Transitions
+        # us to S1_yes_pake and drains queued non-pake events.
+        pass
+
     @m.output()
     def queue(self, side, phase, body):
         assert isinstance(side, str), type(phase)
@@ -63,9 +74,7 @@ class Order:
         self._K.got_pake(body)
 
     @m.output()
-    def drain(self, side, phase, body):
-        del phase
-        del body
+    def drain(self):
         for side, phase, body in self._queue:
             self._deliver(side, phase, body)
         self._queue[:] = []
@@ -78,5 +87,15 @@ class Order:
         self._R.got_message(side, phase, body)
 
     S0_no_pake.upon(got_non_pake, enter=S0_no_pake, outputs=[queue])
-    S0_no_pake.upon(got_pake, enter=S1_yes_pake, outputs=[notify_key, drain])
+    # HYP-423: feeding Key on every got_pake is safe (Key handles
+    # forged-pake parsing internally). What's NOT safe is transitioning
+    # Order's state and draining on a got_pake that may be forged —
+    # that's why we stay in S0_no_pake until Key confirms via
+    # pake_confirmed.
+    S0_no_pake.upon(got_pake, enter=S0_no_pake, outputs=[notify_key])
+    S0_no_pake.upon(pake_confirmed, enter=S1_yes_pake, outputs=[drain])
     S1_yes_pake.upon(got_non_pake, enter=S1_yes_pake, outputs=[deliver])
+    # Subsequent pakes after auth (e.g. peer self-echo) are no-ops at
+    # the order layer; Key's S11.got_pake handles them.
+    S1_yes_pake.upon(got_pake, enter=S1_yes_pake, outputs=[notify_key])
+    S1_yes_pake.upon(pake_confirmed, enter=S1_yes_pake, outputs=[])

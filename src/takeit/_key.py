@@ -82,8 +82,8 @@ class Key:
         self._SK = _SortedKey(self._appid, self._versions, self._side, self._timing)
         self._debug_pake_stashed = False  # for tests
 
-    def wire(self, boss, mailbox, receive):
-        self._SK.wire(boss, mailbox, receive)
+    def wire(self, boss, mailbox, receive, order):
+        self._SK.wire(boss, mailbox, receive, order)
 
     @m.state(initial=True)
     def S00(self):
@@ -131,6 +131,7 @@ class Key:
     S10.upon(got_pake, enter=S11, outputs=[deliver_pake])
     S00.upon(got_pake, enter=S01, outputs=[stash_pake])
     S01.upon(got_code, enter=S11, outputs=[deliver_code_and_stashed_pake])
+    S11.upon(got_pake, enter=S11, outputs=[deliver_pake])
 
 
 @attrs
@@ -142,10 +143,11 @@ class _SortedKey:
     m = MethodicalMachine()
     set_trace = getattr(m, "_setTrace", lambda self, f: None)  # pragma: no cover
 
-    def wire(self, boss, mailbox, receive):
+    def wire(self, boss, mailbox, receive, order):
         self._B = _interfaces.IBoss(boss)
         self._M = _interfaces.IMailbox(mailbox)
         self._R = _interfaces.IReceive(receive)
+        self._O = _interfaces.IOrder(order)
 
     @m.state(initial=True)
     def S0_know_nothing(self):
@@ -170,15 +172,47 @@ class _SortedKey:
 
     # from Ordering
     def got_pake(self, body):
+        # HYP-423: a hostile relay can forward forged events on the
+        # `pake` phase. Anything that fails to parse, fails to find the
+        # `pake_v1` key, OR fails SPAKE2.finish() must be reported as
+        # not-authenticated to Mailbox so the slot is cleared and the
+        # NEXT inbound on this phase is forwarded. Real peer's pake
+        # eventually lands.
         assert isinstance(body, bytes), type(body)
-        payload = bytes_to_dict(body)
-        if "pake_v1" in payload:
-            self.got_pake_good(hexstr_to_bytes(payload["pake_v1"]))
-        else:
-            self.got_pake_bad()
+        try:
+            payload = bytes_to_dict(body)
+        except Exception:
+            self._on_bad_pake()
+            return
+        if not isinstance(payload, dict) or "pake_v1" not in payload:
+            self._on_bad_pake()
+            return
+        try:
+            msg2 = hexstr_to_bytes(payload["pake_v1"])
+        except Exception:
+            self._on_bad_pake()
+            return
+        try:
+            with self._timing.add("pake2", waiting="crypto"):
+                key = self._sp.finish(msg2)
+        except Exception:
+            # SPAKE2 instances are single-use even on failure; rebuild
+            # from the remembered code so the real peer's later pake can
+            # still complete.
+            self._sp = SPAKE2_Symmetric(
+                to_bytes(self._code), idSymmetric=to_bytes(self._appid)
+            )
+            self._sp.start()
+            self._on_bad_pake()
+            return
+        self.got_pake_good(key)
+
+    def _on_bad_pake(self):
+        self._M.peer_message_not_authenticated("pake")
+        self.got_pake_bad()
 
     @m.input()
-    def got_pake_good(self, msg2):
+    def got_pake_good(self, key):
         pass
 
     @m.input()
@@ -200,10 +234,16 @@ class _SortedKey:
         self._B.scared()
 
     @m.output()
-    def compute_key(self, msg2):
-        assert isinstance(msg2, bytes)
-        with self._timing.add("pake2", waiting="crypto"):
-            key = self._sp.finish(msg2)
+    def compute_key(self, key):
+        assert isinstance(key, bytes)
+        # HYP-423 ordering: set R.got_key BEFORE peer_message_authenticated
+        # so that any incoming non-pake events triggered by the auth
+        # callback's redrain (the drain re-publishes our pake, which the
+        # peer may answer with a `version` event in the same synchronous
+        # chain) find R already keyed. If we called peer_message_*
+        # first, A's redrain would chain through to B which would
+        # publish version, and that version would land at B's R (still
+        # keyless) before this compute_key finished setting B.R.got_key.
         # B.got_key transitions Boss's state machine and stays synchronous
         # so ordering with downstream `happy`/`got_verifier`/`got_message`
         # transitions is preserved. The *user-facing* notification
@@ -219,8 +259,28 @@ class _SortedKey:
         # the version message may arrive immediately, so Receive must
         # already have the key to decrypt.
         self._R.got_key(key)
+        # HYP-423: now Order can transition S0_no_pake → S1_yes_pake
+        # and drain queued non-pake events. Doing this AFTER R.got_key
+        # ensures any drained events find R keyed.
+        self._O.pake_confirmed()
+        # And tell Mailbox the auth verdict so the phase slot is moved
+        # from pending → processed and the redrain side-effect fires.
+        self._M.peer_message_authenticated("pake")
         self._M.add_message(phase, encrypted)
 
-    S0_know_nothing.upon(got_code, enter=S1_know_code, outputs=[build_pake])
+    @m.output()
+    def remember_code(self, code):
+        # HYP-423: stash the code so we can rebuild the SPAKE2 instance
+        # if SPAKE2.finish() raises on a forged msg2 (one-shot instance).
+        self._code = code
+
+    S0_know_nothing.upon(
+        got_code, enter=S1_know_code, outputs=[remember_code, build_pake]
+    )
     S1_know_code.upon(got_pake_good, enter=S2_know_key, outputs=[compute_key])
-    S1_know_code.upon(got_pake_bad, enter=S3_scared, outputs=[scared])
+    # HYP-423: a single bad pake does NOT poison the wormhole. We stay
+    # in S1_know_code so the next pake (likely the real peer's) gets a
+    # chance.
+    S1_know_code.upon(got_pake_bad, enter=S1_know_code, outputs=[])
+    S2_know_key.upon(got_pake_good, enter=S2_know_key, outputs=[])
+    S2_know_key.upon(got_pake_bad, enter=S2_know_key, outputs=[])

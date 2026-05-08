@@ -215,8 +215,11 @@ def test_redrain_on_peer_only_fires_once_per_phase(mailbox_setup):
 
 
 def test_redrain_capped_at_max_processed_phases(mailbox_setup):
-    """A malicious peer flooding distinct phase strings cannot grow our
-    memory or amplify our outbound past MAX_PROCESSED_PHASES redrains."""
+    """A malicious peer (or hostile relay) flooding distinct phase
+    strings cannot amplify our outbound past MAX_PROCESSED_PHASES
+    redrains. Under HYP-423 the redrain bound counts pending+processed
+    phases, since pending phases (auth verdict not yet returned) also
+    consume memory."""
     from takeit._mailbox import Mailbox
 
     mb, rc, order, _ = mailbox_setup
@@ -226,16 +229,24 @@ def test_redrain_capped_at_max_processed_phases(mailbox_setup):
     rc.added.clear()  # forget the initial publish
 
     cap = Mailbox.MAX_PROCESSED_PHASES
-    # Send `cap + 50` distinct peer phases; expect exactly `cap` redrains.
+    # Send `cap + 50` distinct peer phases; expect exactly `cap`
+    # redrains. None of these phases ever auth (the test FakeOrder
+    # never calls peer_message_authenticated), so they all sit in
+    # `_pending_phases` until we exceed the cap.
     for i in range(cap + 50):
         mb.rx_message("bbbb", f"p{i}", b"peer-payload")
 
     assert len(rc.added) == cap
-    # All payloads still reach Order — the peer's messages aren't dropped,
-    # just the redrain side-effect is capped.
+    # All payloads still reach Order — the peer's messages aren't
+    # dropped, just the redrain side-effect is capped.
     assert len(order.received) == cap + 50
-    # `_processed` is bounded.
-    assert len(mb._processed) == cap
+    # Pending and processed are both bounded under HYP-423: pending is
+    # capped at MAX_PROCESSED_PHASES so a relay flooding distinct
+    # phases cannot grow our memory unboundedly. _processed only
+    # advances on auth-verdict, which the FakeOrder doesn't trigger,
+    # so it stays empty in this test.
+    assert len(mb._processed) == 0
+    assert len(mb._pending_phases) == cap
 
 
 def test_disconnect_during_close_still_completes_on_reconnect(mailbox_setup):
