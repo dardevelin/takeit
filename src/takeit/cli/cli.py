@@ -861,9 +861,14 @@ def _do_send(
         spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
+            # HYP-437: pass the subprotocol allowlist so SubchannelDemultiplex
+            # rejects opens for unknown subprotocol names (HYP-413's defense
+            # was dormant without this — a malicious authenticated peer
+            # could OPEN any name and have it accepted).
             dw = w.dilate(
                 allow_private_hints=allow_private_hints,
                 stun_servers=stun_servers,
+                expected_subprotocols={P.SUBCHANNEL_NAME},
             )
             yield dw.when_dilated()
             ep = dw.connector_for(P.SUBCHANNEL_NAME)
@@ -1352,9 +1357,13 @@ def _run_receive(
         spinner = _make_spinner(reactor, hide=hide_progress)
         spinner.start()
         try:
+            # HYP-437: pass the subprotocol allowlist so SubchannelDemultiplex
+            # rejects opens for unknown subprotocol names (HYP-413's defense
+            # was dormant without this).
             dw = w.dilate(
                 allow_private_hints=allow_private_hints,
                 stun_servers=stun_servers,
+                expected_subprotocols={P.SUBCHANNEL_NAME},
             )
             yield dw.when_dilated()
             listener_ep = dw.listener_for(P.SUBCHANNEL_NAME)
