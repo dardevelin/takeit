@@ -171,6 +171,15 @@ A few honest limits:
 - Peers can see direct connection hints you choose to advertise. Private
   LAN hint connections require `--allow-private-hints`; STUN-derived
   public-IP hints require explicit `--stun-server HOST:PORT`.
+- Symmetrically: an authenticated peer can cause your machine to
+  attempt outbound TCP connections to public IPs and ports they
+  choose. This is how peer-to-peer hole-punching works — the peer
+  advertises direct hints and your client tries them. takeit caps
+  per-session attempts and filters private/CGNAT/loopback addresses
+  by default, but if you don't trust the person you're transferring
+  with, expect outbound traffic from your machine to destinations
+  they pick (visible in firewall logs, ISP records). Route through
+  Tor for stronger opacity.
 - If both you and the receiver are behind tricky network setups
   (corporate firewalls, mobile carrier-grade NAT), the direct connection
   may fail — there's no fallback to "send through us." Try from a
