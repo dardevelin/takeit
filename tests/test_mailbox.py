@@ -272,9 +272,12 @@ def test_hyp458_auth_redrain_only_fires_for_admitted_phases(mailbox_setup):
         f"expected {cap} admission redrains, got {len(rc.added)}"
     )
 
-    # Now send 100 more phases — these are NOT admitted (cap exhausted).
+    # Now send `overflow` more phases (overflow tied to cap so the
+    # ratio between admitted and rejected is meaningful) — these are
+    # NOT admitted (cap exhausted).
+    overflow = cap  # equal to cap so we have 2× cap total inbound
     pre_admission_redrains = len(rc.added)
-    for i in range(cap, cap + 100):
+    for i in range(cap, cap + overflow):
         mb.rx_message("bbbb", f"p{i}", b"peer-payload")
     # No admission redrains for the over-cap phases (HYP-423 already
     # capped this).
@@ -286,7 +289,7 @@ def test_hyp458_auth_redrain_only_fires_for_admitted_phases(mailbox_setup):
     # each triggered _drain(). Post-fix: zero redrains for phases that
     # were never in _pending_phases.
     pre_auth_redrains = len(rc.added)
-    for i in range(cap, cap + 100):
+    for i in range(cap, cap + overflow):
         mb.peer_message_authenticated(f"p{i}")
     # HYP-458: zero new redrains because none of those phases were
     # actually admitted.

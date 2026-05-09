@@ -232,6 +232,11 @@ class Mailbox:
         # Fix: only redrain if THIS phase was actually admitted (was in
         # _pending_phases when auth ran). An unadmitted phase reaching
         # the verdict path was a peer spamming past the cap; no redrain.
+        #
+        # ORDER LOAD-BEARING: capture membership BEFORE pop. If you swap
+        # these two lines, was_pending is ALWAYS False and legitimate
+        # auth verdicts stop redraining (silent breakage; only caught by
+        # the hyp458_auth_redrain_still_fires_for_admitted_phase test).
         was_pending = phase in self._pending_phases
         self._pending_phases.pop(phase, None)
         if phase not in self._processed:

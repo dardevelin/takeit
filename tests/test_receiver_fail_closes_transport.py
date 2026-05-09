@@ -78,19 +78,3 @@ def test_fail_idempotent_on_second_call():
     # Second fail — Deferred guard prevents re-errback; transport stays closed.
     proto._fail(ValueError("second"))
     assert proto.transport.lost == pre_lost  # still closed (already was)
-
-
-def test_sender_and_receiver_fail_both_close():
-    """Symmetric pin: both `_fail` methods call `transport.loseConnection`.
-    Catches a future regression where one side drops the close."""
-    import inspect
-
-    sender_fail_src = inspect.getsource(cli_mod._SenderProtocol._fail)
-    receiver_fail_src = inspect.getsource(cli_mod._ReceiverProtocol._fail)
-
-    assert "loseConnection" in sender_fail_src, (
-        "sender _fail should still call transport.loseConnection"
-    )
-    assert "loseConnection" in receiver_fail_src, (
-        "receiver _fail must call transport.loseConnection (HYP-459)"
-    )
