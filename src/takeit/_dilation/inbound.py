@@ -5,7 +5,18 @@ from zope.interface import implementer
 from twisted.python import log
 from .._interfaces import IDilationManager, IInbound, ISubChannel
 from ..util import provides
-from .subchannel import SubChannel, SubchannelAddress, UnexpectedSubprotocol
+from .subchannel import (
+    PendingOpenCapExceeded,
+    SubChannel,
+    SubchannelAddress,
+    UnexpectedSubprotocol,
+)
+
+# HYP-455: total open subchannels per Manager. Higher than
+# MAX_PENDING_OPENS_PER_SUBPROTOCOL because this is the global cap, not
+# per-name. A peer that authenticates and opens 256+ subchannels is
+# either non-conforming or hostile.
+MAX_OPEN_SUBCHANNELS = 256
 
 
 class DuplicateOpenError(Exception):
@@ -71,16 +82,28 @@ class Inbound:
         if scid in self._open_subchannels:
             log.err(DuplicateOpenError(f"received duplicate OPEN for {scid}"))
             return
+        # HYP-455: cap total open subchannels. Even if every individual
+        # OPEN is for an expected subprotocol that's already registered,
+        # the total count is unbounded without this guard. Hostile peer
+        # could spam OPENs with distinct scids to exhaust memory.
+        if len(self._open_subchannels) >= MAX_OPEN_SUBCHANNELS:
+            log.msg(
+                f"HYP-455: refusing OPEN for scid {scid} — "
+                f"open-subchannel cap ({MAX_OPEN_SUBCHANNELS}) reached"
+            )
+            self._manager.send_close(scid)
+            return
         peer_addr = SubchannelAddress(subprotocol)
         sc = SubChannel(scid, self._manager, self._host_addr, peer_addr)
         self._open_subchannels[scid] = sc
         # this can produce a (synchronous) UnexpectedSubprotocol if
         # the user specified "expected subprotocols" but this one
-        # isn't in the list.
+        # isn't in the list. HYP-455: PendingOpenCapExceeded fires when
+        # an expected-but-unregistered subprotocol's OPEN queue is full.
         try:
             # maybe this should be in Manager?
             self._manager._subprotocol_factories._got_open(sc, peer_addr)
-        except UnexpectedSubprotocol:
+        except (UnexpectedSubprotocol, PendingOpenCapExceeded):
             self._manager.send_close(scid)
             del self._open_subchannels[scid]
 

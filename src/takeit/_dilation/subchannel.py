@@ -16,9 +16,17 @@ from twisted.internet.interfaces import (
     IStreamServerEndpoint,
 )
 from twisted.internet.error import ConnectionDone
+from twisted.python import log
 from automat import MethodicalMachine
 from .._interfaces import ISubChannel, IDilationManager
 from ..util import provides
+
+# HYP-455: caps on inbound subchannel buffers. A Noise-authenticated peer
+# can otherwise send unbounded OPENs / DATA before the local factory is
+# connected. Per-name OPEN cap is generous (legitimate use is 0..few);
+# per-channel byte cap mirrors HYP-440's outbound 16 MiB.
+MAX_PENDING_OPENS_PER_SUBPROTOCOL = 64
+MAX_PENDING_REMOTE_DATA_BYTES = 16 << 20
 
 # each subchannel frame (the data passed into transport.write(data)) gets a
 # 9-byte header prefix (type, subchannel id, and sequence number), then gets
@@ -63,6 +71,14 @@ class UnexpectedSubprotocol(Exception):
     """
 
 
+class PendingOpenCapExceeded(Exception):
+    """
+    HYP-455: peer sent more OPENs for an expected-but-unregistered
+    subprotocol than the per-name cap allows. The peer is non-conforming
+    or hostile; Inbound closes the subchannel.
+    """
+
+
 @implementer(IAddress)
 class _WormholeAddress:
     pass
@@ -102,6 +118,11 @@ class SubChannel:
         # self._processed = set()
         self._protocol = None
         self._pending_remote_data = []
+        # HYP-455: track total queued bytes so we can cap before the
+        # local protocol attaches. The cap mirrors HYP-440's outbound
+        # 16 MiB. Going over forces a close-and-drop rather than
+        # silently consuming memory on a non-conforming peer's behalf.
+        self._pending_remote_data_bytes = 0
         self._pending_remote_close = False
 
     @m.state(initial=True)
@@ -160,7 +181,22 @@ class SubChannel:
 
     @m.output()
     def queue_remote_data(self, data):
+        # HYP-455: cap pre-attach data buffering. The post-attach path
+        # delivers bytes synchronously to the local protocol (no queue),
+        # so this only fires while the local factory hasn't connected
+        # yet. Going over cap closes the channel and stops accepting
+        # further data — preferable to OOM under a hostile peer.
+        if self._pending_remote_data_bytes + len(data) > MAX_PENDING_REMOTE_DATA_BYTES:
+            log.msg(
+                f"HYP-455: subchannel {self._scid} pre-attach data exceeded "
+                f"{MAX_PENDING_REMOTE_DATA_BYTES} bytes; closing"
+            )
+            self._manager.send_close(self._scid)
+            self._pending_remote_data = []
+            self._pending_remote_data_bytes = 0
+            return
         self._pending_remote_data.append(data)
+        self._pending_remote_data_bytes += len(data)
 
     @m.output()
     def queue_remote_close(self):
@@ -430,6 +466,13 @@ class SubchannelDemultiplex:
         else:
             if name not in self._expected:
                 raise UnexpectedSubprotocol()
+            # HYP-455: cap per-name pending OPENs. Legitimate use queues
+            # 0..few per subprotocol while waiting for the local
+            # `register()` call; an authenticated-but-hostile peer can
+            # otherwise spend memory by spamming OPENs for an
+            # expected-but-never-registered subprotocol name.
+            if len(self._pending_opens[name]) >= MAX_PENDING_OPENS_PER_SUBPROTOCOL:
+                raise PendingOpenCapExceeded(name)
             self._pending_opens[name].append((t, peer_addr))
 
     def _connect(self, factory, t, peer_addr):
