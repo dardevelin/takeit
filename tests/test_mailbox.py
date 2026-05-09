@@ -249,6 +249,101 @@ def test_redrain_capped_at_max_processed_phases(mailbox_setup):
     assert len(mb._pending_phases) == cap
 
 
+def test_hyp458_auth_redrain_only_fires_for_admitted_phases(mailbox_setup):
+    """HYP-458: an authenticated peer can spam ciphertexts on endless
+    distinct phases. Each one's auth verdict pre-fix triggered _drain()
+    even when the phase was never admitted into _pending_phases (cap
+    rejected at receive time). Post-fix: redrain runs only when the
+    phase WAS admitted (i.e. legit auth verdict for an admitted phase),
+    not for spam past the cap.
+    """
+    mb, rc, order, _ = mailbox_setup
+    mb.got_tag("xyz")
+    mb.connected()
+    mb.add_message("pake", b"my-pake")
+    rc.added.clear()  # forget the initial publish
+
+    cap = Mailbox.MAX_PROCESSED_PHASES
+    # Admit `cap` phases (they sit in _pending_phases until auth).
+    for i in range(cap):
+        mb.rx_message("bbbb", f"p{i}", b"peer-payload")
+    # cap-many redrains so far (one per admission).
+    assert len(rc.added) == cap, (
+        f"expected {cap} admission redrains, got {len(rc.added)}"
+    )
+
+    # Now send 100 more phases — these are NOT admitted (cap exhausted).
+    pre_admission_redrains = len(rc.added)
+    for i in range(cap, cap + 100):
+        mb.rx_message("bbbb", f"p{i}", b"peer-payload")
+    # No admission redrains for the over-cap phases (HYP-423 already
+    # capped this).
+    assert len(rc.added) == pre_admission_redrains, (
+        "over-cap admissions must not redrain"
+    )
+
+    # Authenticated verdicts arrive for ALL the over-cap phases. Pre-fix
+    # each triggered _drain(). Post-fix: zero redrains for phases that
+    # were never in _pending_phases.
+    pre_auth_redrains = len(rc.added)
+    for i in range(cap, cap + 100):
+        mb.peer_message_authenticated(f"p{i}")
+    # HYP-458: zero new redrains because none of those phases were
+    # actually admitted.
+    assert len(rc.added) == pre_auth_redrains, (
+        "auth verdicts for unadmitted phases must NOT redrain "
+        f"(amplification): expected {pre_auth_redrains}, "
+        f"got {len(rc.added)}"
+    )
+
+
+def test_hyp458_auth_redrain_still_fires_for_admitted_phase(mailbox_setup):
+    """Negative control for HYP-458: a legitimate auth-verdict for an
+    ADMITTED phase MUST still redrain. The fix targets unadmitted
+    spam phases only."""
+    mb, rc, _, _ = mailbox_setup
+    mb.got_tag("xyz")
+    mb.connected()
+    mb.add_message("pake", b"my-pake")
+    rc.added.clear()
+
+    # Admit one phase.
+    mb.rx_message("bbbb", "phase-1", b"peer-payload")
+    pre_auth = len(rc.added)
+    assert pre_auth == 1, "admission redrain should have fired"
+
+    # Auth verdict arrives — this must still redrain (our test FakeOrder
+    # doesn't loop the verdict, so we call it directly).
+    mb.peer_message_authenticated("phase-1")
+    # The post-auth redrain fires; rc.added grows by one.
+    assert len(rc.added) == pre_auth + 1, (
+        "auth verdict for admitted phase must redrain (legit signal)"
+    )
+
+
+def test_hyp458_auth_redrain_does_not_fire_after_dedup(mailbox_setup):
+    """If a phase is already in `_processed`, its auth verdict is a
+    no-op (duplicate). No redrain — the phase wasn't pending."""
+    mb, rc, _, _ = mailbox_setup
+    mb.got_tag("xyz")
+    mb.connected()
+    mb.add_message("pake", b"my-pake")
+    rc.added.clear()
+
+    # Admit + auth once → moves phase to _processed.
+    mb.rx_message("bbbb", "phase-1", b"peer-payload")
+    mb.peer_message_authenticated("phase-1")
+    assert "phase-1" in mb._processed
+    pre_redrain = len(rc.added)
+
+    # Re-fire the auth verdict (e.g. a buggy stack double-calls). The
+    # phase is in _processed, NOT in _pending_phases — no redrain.
+    mb.peer_message_authenticated("phase-1")
+    assert len(rc.added) == pre_redrain, (
+        "auth verdict for already-processed phase must not redrain"
+    )
+
+
 def test_disconnect_during_close_still_completes_on_reconnect(mailbox_setup):
     """If we lose the relay during close, we must re-send tx_close on reconnect
     so the receiver of rx_closed (or our local synthesis of it) will fire."""

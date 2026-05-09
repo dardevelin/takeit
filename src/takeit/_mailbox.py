@@ -216,19 +216,29 @@ class Mailbox:
 
     @m.output()
     def _accept_peer_message(self, phase):
-        # Auth verdict arrived: this phase is real. Clear pending and
-        # ALWAYS redrain outbound — even if we've hit
-        # MAX_PROCESSED_PHASES, the "peer just confirmed subscribed"
-        # signal still matters for reliability (Nostr doesn't buffer
-        # ephemeral events, so we re-publish so the peer can see what
-        # they may have missed). We stop GROWING `_processed` past the
-        # cap so memory is bounded; redrains themselves are cheap (we
-        # publish a finite number of distinct phases).
+        # Auth verdict arrived: clear pending. Whether to redrain
+        # depends on whether this phase was actually admitted at
+        # receive time.
+        #
+        # HYP-458: an authenticated peer can spam ciphertexts on
+        # endless distinct phase numbers. `accept_peer_message_and_redrain`
+        # already STOPS admitting new phases past MAX_PROCESSED_PHASES
+        # (won't park them in _pending_phases or grow _processed). But
+        # the auth verdict came back regardless, and the pre-fix
+        # always-redrain meant each spam phase still triggered a Nostr
+        # republish (with PoW). Result: 1 inbound message → N outbound
+        # republishes amplification.
+        #
+        # Fix: only redrain if THIS phase was actually admitted (was in
+        # _pending_phases when auth ran). An unadmitted phase reaching
+        # the verdict path was a peer spamming past the cap; no redrain.
+        was_pending = phase in self._pending_phases
         self._pending_phases.pop(phase, None)
         if phase not in self._processed:
             if len(self._processed) < self.MAX_PROCESSED_PHASES:
                 self._processed.add(phase)
-        self._drain()
+        if was_pending:
+            self._drain()
 
     @m.output()
     def _ignore_peer_message(self, phase):
