@@ -44,10 +44,24 @@ from . import _interfaces
 # values to amplify the Mailbox redrain.
 _PHASE_RE = re.compile(r"^(pake|version|\d{1,10}|dilate-\d{1,10})$")
 
+# HYP-454: the locally-generated side is os.urandom(5) → 10-char lowercase
+# hex (api.py:294 via bytes_to_hexstr). A malicious relay that injects a
+# non-ASCII s tag would crash derive_phase_key (`side.encode("ascii")`)
+# BEFORE peer_message_not_authenticated() runs, leaving the phase pending
+# and silently dropping the real peer's later message. Enforce shape at
+# rendezvous ingress so non-conforming events are dropped before reaching
+# the key-derivation path.
+_SIDE_RE = re.compile(r"^[0-9a-f]{10}$")
+
 
 def _is_valid_phase(phase):
     """True iff `phase` is one of the takeit's known control phases."""
     return isinstance(phase, str) and bool(_PHASE_RE.fullmatch(phase))
+
+
+def _is_valid_side(side):
+    """True iff `side` matches the local 10-char lowercase-hex format."""
+    return isinstance(side, str) and bool(_SIDE_RE.fullmatch(side))
 
 
 # Nostr ephemeral kind: relays must NOT persist these. NIP-16.
@@ -264,6 +278,12 @@ class NostrRendezvous:
             log.err(
                 ValueError("takeit: received Nostr event missing s/p tags; ignoring")
             )
+            return
+        if not _is_valid_side(side):
+            # HYP-454: drop before reaching derive_phase_key, which
+            # would otherwise raise UnicodeEncodeError on non-ASCII
+            # side and wedge the phase in Mailbox._pending_phases.
+            log.msg(f"takeit: dropping inbound event with invalid side: {side!r}")
             return
         if not _is_valid_phase(phase):
             log.msg(f"takeit: dropping inbound event with invalid phase: {phase!r}")

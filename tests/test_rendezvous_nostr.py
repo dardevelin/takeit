@@ -270,9 +270,9 @@ def _build_event(
 def test_deliver_inbound_passes_through_to_mailbox():
     rv, _, mailbox, _ = _wired()
     sub_id = _set_active_subscription(rv)
-    event = _build_event("their-side", "pake", b"some-body")
+    event = _build_event("abcdef0123", "pake", b"some-body")
     rv._deliver_inbound(event, sub_id)
-    assert ("rx_message", "their-side", "pake", b"some-body") in mailbox.events
+    assert ("rx_message", "abcdef0123", "pake", b"some-body") in mailbox.events
 
 
 def test_deliver_inbound_accepts_known_phases():
@@ -289,7 +289,7 @@ def test_deliver_inbound_accepts_known_phases():
         "dilate-3",
         "dilate-9999",
     ):
-        event = _build_event("their-side", phase, b"x")
+        event = _build_event("abcdef0123", phase, b"x")
         rv._deliver_inbound(event, sub_id)
     assert sum(1 for e in mailbox.events if e[0] == "rx_message") == 8
 
@@ -314,7 +314,7 @@ def test_deliver_inbound_drops_invalid_phases():
         "dilate-x",
         "X" * 100,
     ):
-        event = _build_event("their-side", bad_phase, b"x")
+        event = _build_event("abcdef0123", bad_phase, b"x")
         rv._deliver_inbound(event, sub_id)
     # No rx_message events delivered for any of those invalid phases.
     assert not any(e[0] == "rx_message" for e in mailbox.events)
@@ -359,7 +359,7 @@ def test_deliver_inbound_drops_event_missing_tags():
 def test_deliver_inbound_drops_wrong_kind():
     rv, _, mailbox, _ = _wired()
     sub_id = _set_active_subscription(rv)
-    event = _build_event("their-side", "pake", b"some-body", kind=1)
+    event = _build_event("abcdef0123", "pake", b"some-body", kind=1)
     rv._deliver_inbound(event, sub_id)
     assert mailbox.events == []
 
@@ -367,7 +367,7 @@ def test_deliver_inbound_drops_wrong_kind():
 def test_deliver_inbound_drops_wrong_t_tag():
     rv, _, mailbox, _ = _wired()
     _set_active_subscription(rv, tag="expected-tag")
-    event = _build_event("their-side", "pake", b"some-body", t_tag="other-tag")
+    event = _build_event("abcdef0123", "pake", b"some-body", t_tag="other-tag")
     rv._deliver_inbound(event, "sub-0")
     assert mailbox.events == []
 
@@ -375,7 +375,7 @@ def test_deliver_inbound_drops_wrong_t_tag():
 def test_deliver_inbound_drops_wrong_subscription_id():
     rv, _, mailbox, _ = _wired()
     _set_active_subscription(rv, sub_id="sub-good")
-    event = _build_event("their-side", "pake", b"some-body")
+    event = _build_event("abcdef0123", "pake", b"some-body")
     rv._deliver_inbound(event, "sub-bad")
     assert mailbox.events == []
 
@@ -384,7 +384,7 @@ def test_deliver_inbound_drops_invalid_base64_content():
     rv, _, mailbox, _ = _wired()
     sub_id = _set_active_subscription(rv)
     event = _build_event(
-        "their-side",
+        "abcdef0123",
         "pake",
         b"",
         raw_content="not base64!!!",
@@ -399,7 +399,7 @@ def test_deliver_inbound_drops_oversized_content():
     # Keep the event valid base64 but past the inbound encoded cap.
     raw_content = "A" * (MAX_INBOUND_EVENT_CONTENT_B64_BYTES + 4)
     event = _build_event(
-        "their-side",
+        "abcdef0123",
         "pake",
         b"",
         raw_content=raw_content,
@@ -422,8 +422,8 @@ async def test_integration_two_nostr_rendezvous_meet():  # pragma: no cover
     Skipped by default. Set TAKEIT_TEST_RELAY=wss://relay.example to run.
     """
     relay = os.environ["TAKEIT_TEST_RELAY"]
-    rv_a, _, mb_a, _ = _wired(side="sideAAAA", relays=(relay,))
-    rv_b, _, mb_b, _ = _wired(side="sideBBBB", relays=(relay,))
+    rv_a, _, mb_a, _ = _wired(side="aaaaaaaaaa", relays=(relay,))
+    rv_b, _, mb_b, _ = _wired(side="bbbbbbbbbb", relays=(relay,))
     await rv_a._async_start()
     await rv_b._async_start()
     await rv_a._async_subscribe("integration-test-tag-xyz")
