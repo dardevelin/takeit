@@ -1769,6 +1769,10 @@ class _ReceiverProtocol(Protocol):
         self._stopped = True
         if not self._factory.done.called:
             self._factory.done.errback(exc)
+        # HYP-459: mirror sender's `_fail` — close the transport so a
+        # misbehaving peer's subchannel doesn't stay alive while we
+        # unwind. Symmetric to cli.py:1068's sender `_fail`.
+        self.transport.loseConnection()
 
     def connectionLost(self, reason):
         # Flush whatever progress we have before closing.
