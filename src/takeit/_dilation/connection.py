@@ -527,6 +527,29 @@ class _Record:
         self._framer.send_frame(frame)
 
 
+# HYP-460: cap the pre-select inbound record queue. A Noise-authenticated
+# peer can pack KCM + many encrypted records into a single TCP turn;
+# Connector defers .select() through the eventual queue, so each record
+# arriving in the meantime appends to _inbound_record_queue. Without a
+# cap, the queue grows unboundedly during one reactor turn. Mirrors
+# HYP-440 (outbound 16 MiB) and HYP-455 (inbound subchannel byte cap)
+# scaled for the candidate-connection lifetime: 1 MiB / 64 records is
+# well above any legitimate pre-select burst.
+MAX_PRESELECT_RECORDS = 64
+MAX_PRESELECT_RECORD_BYTES = 1 << 20
+
+
+def _record_byte_size(record):
+    """Approximate inbound record size for HYP-460's byte cap.
+    Data records carry the bulk; control records (KCM/Ping/Pong/Ack/
+    Open/Close) are tiny. Mirror HYP-440's outbound `_record_byte_size`
+    so caps balance across directions."""
+    data = getattr(record, "data", None)
+    if data is None:
+        return 0
+    return len(data)
+
+
 @attrs(eq=False)
 class DilatedConnectionProtocol(Protocol):
     """I manage an L2 connection.
@@ -558,6 +581,11 @@ class DilatedConnectionProtocol(Protocol):
         self._disconnected = OneShotObserver(self._eventual_queue)
         self._can_send_records = False
         self._inbound_record_queue = []
+        # HYP-460: byte counter + terminal flag so a single hostile peer
+        # can't fill the pre-select queue, force a close, then re-fill
+        # (per `feedback_caps_must_be_terminal.md`).
+        self._preselect_byte_total = 0
+        self._preselect_cap_tripped = False
 
     @m.state(initial=True)
     def unselected(self):
@@ -597,7 +625,27 @@ class DilatedConnectionProtocol(Protocol):
         # deliver_record. So we need to queue the record for a turn. TODO:
         # when we move to the sans-io event-driven scheme, this queue
         # shouldn't be necessary
+        #
+        # HYP-460: cap how much can pile up in this single-turn window.
+        # Authenticated peer can otherwise pack KCM + arbitrary records
+        # into one TCP turn and grow memory before .select() runs.
+        if self._preselect_cap_tripped:
+            return
+        size = _record_byte_size(record)
+        if (
+            len(self._inbound_record_queue) >= MAX_PRESELECT_RECORDS
+            or self._preselect_byte_total + size > MAX_PRESELECT_RECORD_BYTES
+        ):
+            log.msg(
+                "HYP-460: pre-select record queue cap reached; closing "
+                f"candidate connection (n={len(self._inbound_record_queue)}, "
+                f"bytes={self._preselect_byte_total})"
+            )
+            self._preselect_cap_tripped = True
+            self.transport.loseConnection()
+            return
         self._inbound_record_queue.append(record)
+        self._preselect_byte_total += size
 
     @m.output()
     def set_manager(self, manager):
