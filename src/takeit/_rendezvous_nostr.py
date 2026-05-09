@@ -37,6 +37,7 @@ from twisted.python import log
 from zope.interface import implementer
 
 from . import _interfaces
+from .util import SIDE_BYTE_LENGTH
 
 # Whitelist of valid phase strings on the takeit control channel. The
 # rendezvous drops events with anything else BEFORE they reach Mailbox —
@@ -44,14 +45,15 @@ from . import _interfaces
 # values to amplify the Mailbox redrain.
 _PHASE_RE = re.compile(r"^(pake|version|\d{1,10}|dilate-\d{1,10})$")
 
-# HYP-454: the locally-generated side is os.urandom(5) → 10-char lowercase
-# hex (api.py:294 via bytes_to_hexstr). A malicious relay that injects a
-# non-ASCII s tag would crash derive_phase_key (`side.encode("ascii")`)
-# BEFORE peer_message_not_authenticated() runs, leaving the phase pending
-# and silently dropping the real peer's later message. Enforce shape at
+# HYP-454: the locally-generated side is os.urandom(SIDE_BYTE_LENGTH) →
+# 2*SIDE_BYTE_LENGTH lowercase hex chars (api.py via bytes_to_hexstr). A
+# malicious relay that injects a non-ASCII s tag would crash
+# derive_phase_key (`side.encode("ascii")`) BEFORE
+# peer_message_not_authenticated() runs, leaving the phase pending and
+# silently dropping the real peer's later message. Enforce shape at
 # rendezvous ingress so non-conforming events are dropped before reaching
 # the key-derivation path.
-_SIDE_RE = re.compile(r"^[0-9a-f]{10}$")
+_SIDE_RE = re.compile(rf"^[0-9a-f]{{{2 * SIDE_BYTE_LENGTH}}}$")
 
 
 def _is_valid_phase(phase):

@@ -41,6 +41,15 @@ def to_unicode(any):
     return any.decode("ascii")
 
 
+# HYP-454: the locally-generated takeit `side` is
+# `os.urandom(SIDE_BYTE_LENGTH)` encoded as hex (so the wire form is
+# `2 * SIDE_BYTE_LENGTH` lowercase hex chars). Used by api.py to
+# generate the side and by _rendezvous_nostr's ingress regex to
+# validate inbound events. Constant lives here to avoid a circular
+# import between api.py and _rendezvous_nostr.py.
+SIDE_BYTE_LENGTH = 5
+
+
 def bytes_to_hexstr(b):
     assert isinstance(b, bytes)
     hexstr = hexlify(b).decode("ascii")

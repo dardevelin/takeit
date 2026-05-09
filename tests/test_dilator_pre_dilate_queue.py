@@ -108,9 +108,10 @@ def test_byte_cap_constant_pinned():
 
 
 def test_drain_clears_byte_counter():
-    """When `dilate()` is called and Manager is constructed, the queue
-    drains and the byte counter resets. The next message after dilate()
-    bypasses the queue entirely (Manager is now real)."""
+    """When `dilate()` is called and Manager is constructed,
+    `_drain_pending_inbound(manager)` drains the queue, delivers each
+    plaintext to manager.received_dilation_message, and resets the byte
+    counter."""
     d = _make_dilator()
     chunk = b"y" * 1024
     for _ in range(50):
@@ -118,16 +119,7 @@ def test_drain_clears_byte_counter():
     assert d._pending_inbound_dilate_total_bytes == 50 * 1024
     assert len(d._pending_inbound_dilate_messages) == 50
 
-    # Manually simulate Manager arriving and draining (since calling
-    # dilate() requires the full Boss/Dilator construction). The drain
-    # sequence in dilate() is:
-    #   while q: q.popleft(); m.received_dilation_message(p)
-    #   self._pending_inbound_dilate_total_bytes = 0
-    while d._pending_inbound_dilate_messages:
-        d._pending_inbound_dilate_messages.popleft()
-    d._pending_inbound_dilate_total_bytes = 0
-
-    # Simulate Manager being attached.
+    # Stub Manager just captures the delivered plaintexts.
     class _StubManager:
         def __init__(self):
             self.received = []
@@ -135,12 +127,32 @@ def test_drain_clears_byte_counter():
         def received_dilation_message(self, p):
             self.received.append(p)
 
-    d._manager = _StubManager()
-    # Now received_dilate goes straight to the manager.
-    d.received_dilate(b"after-dilate")
-    assert d._manager.received == [b"after-dilate"]
-    # Queue stays empty + byte counter at 0.
+    manager = _StubManager()
+    # Test the drain helper directly — it's the documented seam between
+    # received_dilate and the Manager attachment.
+    d._drain_pending_inbound(manager)
+
+    # All 50 queued plaintexts delivered to the new manager.
+    assert manager.received == [chunk] * 50
+    # Queue + byte counter reset.
     assert len(d._pending_inbound_dilate_messages) == 0
+    assert d._pending_inbound_dilate_total_bytes == 0
+
+
+def test_drain_with_empty_queue_is_noop():
+    """Negative control: drain on an empty queue is safe."""
+    d = _make_dilator()
+
+    class _StubManager:
+        def __init__(self):
+            self.received = []
+
+        def received_dilation_message(self, p):
+            self.received.append(p)
+
+    manager = _StubManager()
+    d._drain_pending_inbound(manager)
+    assert manager.received == []
     assert d._pending_inbound_dilate_total_bytes == 0
 
 

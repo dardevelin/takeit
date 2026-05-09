@@ -1165,11 +1165,7 @@ class Dilator:
                 m.got_dilation_key(self._pending_dilation_key)
             if self._pending_wormhole_versions:
                 m.got_wormhole_versions(self._pending_wormhole_versions)
-            while self._pending_inbound_dilate_messages:
-                plaintext = self._pending_inbound_dilate_messages.popleft()
-                m.received_dilation_message(plaintext)
-            # HYP-456: byte counter resets along with the drained queue.
-            self._pending_inbound_dilate_total_bytes = 0
+            self._drain_pending_inbound(m)
 
         return self._manager._api
 
@@ -1204,6 +1200,16 @@ class Dilator:
             self._manager.got_wormhole_versions(their_wormhole_versions)
         else:
             self._pending_wormhole_versions = their_wormhole_versions
+
+    def _drain_pending_inbound(self, manager):
+        """HYP-456: deliver queued pre-dilate messages to the now-attached
+        Manager and reset the byte counter. Extracted as a helper so
+        tests can pin the drain semantics directly without simulating
+        the full dilate() construction."""
+        while self._pending_inbound_dilate_messages:
+            plaintext = self._pending_inbound_dilate_messages.popleft()
+            manager.received_dilation_message(plaintext)
+        self._pending_inbound_dilate_total_bytes = 0
 
     def received_dilate(self, plaintext):
         if not self._manager:

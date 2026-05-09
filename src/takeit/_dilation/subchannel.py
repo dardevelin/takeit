@@ -471,7 +471,14 @@ class SubchannelDemultiplex:
             # `register()` call; an authenticated-but-hostile peer can
             # otherwise spend memory by spamming OPENs for an
             # expected-but-never-registered subprotocol name.
-            if len(self._pending_opens[name]) >= MAX_PENDING_OPENS_PER_SUBPROTOCOL:
+            #
+            # `.get(name, ())` rather than `[name]` to avoid inserting an
+            # empty deque on the cap-exceeded path — that would slowly
+            # leak entries into _pending_opens for hostile names.
+            if (
+                len(self._pending_opens.get(name, ()))
+                >= MAX_PENDING_OPENS_PER_SUBPROTOCOL
+            ):
                 raise PendingOpenCapExceeded(name)
             self._pending_opens[name].append((t, peer_addr))
 

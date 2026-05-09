@@ -29,7 +29,7 @@ from .errors import NoKeyError, WormholeClosed
 from .eventual import EventualQueue
 from .observer import OneShotObserver, SequenceObserver
 from .timing import DebugTiming
-from .util import bytes_to_hexstr, to_bytes
+from .util import SIDE_BYTE_LENGTH, bytes_to_hexstr, to_bytes
 
 # Hardcoded shortlist of well-known public Nostr relays. Override via
 # `relays=[...]` to takeit.create(), or via `--relay` on the CLI. These are
@@ -291,7 +291,7 @@ def create(
     :returns: a Wormhole. Deferred-mode unless ``delegate`` is given.
     """
     timing = timing or DebugTiming()
-    side = bytes_to_hexstr(os.urandom(5))
+    side = bytes_to_hexstr(os.urandom(SIDE_BYTE_LENGTH))
     eq = _eventual_queue or EventualQueue(reactor)
     cooperator = Cooperator(scheduler=eq.eventually)
 
