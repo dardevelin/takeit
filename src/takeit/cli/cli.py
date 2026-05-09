@@ -1664,6 +1664,16 @@ class _ReceiverProtocol(Protocol):
         # Skip if no prior sidecar matched (fresh transfer).
         if self._factory._prior_matches:
             prior = R.load_receiver_state(self._factory._meta_path)
+            # HYP-452: the sidecar passed prior_matches_offer in
+            # _run_receive, but it can disappear or become unreadable
+            # between then and now (concurrent rm, chmod, fs hiccup).
+            # `load_receiver_state` returns None for any of those.
+            # Fall back to fresh-transfer rather than raising
+            # AttributeError — it's strictly safer (a fresh transfer
+            # never exposes more than the resume path would).
+            if prior is None:
+                self._on_chunks_have_verified(set(), [])
+                return
             claimed = list(prior.get("chunks_have", []))
             d = deferToThread(
                 R.verify_chunks_have,
