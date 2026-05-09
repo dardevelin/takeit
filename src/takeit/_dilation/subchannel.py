@@ -123,6 +123,11 @@ class SubChannel:
         # 16 MiB. Going over forces a close-and-drop rather than
         # silently consuming memory on a non-conforming peer's behalf.
         self._pending_remote_data_bytes = 0
+        # HYP-457: once the cap fires, the channel is terminal — further
+        # remote_data must drop without buffering. Otherwise an
+        # authenticated peer can cycle 16 MiB → close-buffer-clear →
+        # 16 MiB ad infinitum, defeating HYP-455's cap.
+        self._cap_tripped = False
         self._pending_remote_close = False
 
     @m.state(initial=True)
@@ -186,6 +191,13 @@ class SubChannel:
         # so this only fires while the local factory hasn't connected
         # yet. Going over cap closes the channel and stops accepting
         # further data — preferable to OOM under a hostile peer.
+        #
+        # HYP-457: once tripped, the cap is terminal. Subsequent
+        # remote_data calls drop without buffering. Without this guard,
+        # a peer could repeatedly fill→trigger close→re-fill, cycling
+        # memory pressure indefinitely.
+        if self._cap_tripped:
+            return
         if self._pending_remote_data_bytes + len(data) > MAX_PENDING_REMOTE_DATA_BYTES:
             log.msg(
                 f"HYP-455: subchannel {self._scid} pre-attach data exceeded "
@@ -194,6 +206,7 @@ class SubChannel:
             self._manager.send_close(self._scid)
             self._pending_remote_data = []
             self._pending_remote_data_bytes = 0
+            self._cap_tripped = True
             return
         self._pending_remote_data.append(data)
         self._pending_remote_data_bytes += len(data)

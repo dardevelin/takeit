@@ -239,6 +239,51 @@ def test_pending_remote_data_cap_uses_max_constant():
     assert MAX_PENDING_REMOTE_DATA_BYTES == 16 << 20
 
 
+def test_pending_remote_data_cap_is_terminal_hyp457():
+    """HYP-457: once the cap fires, further remote_data must be
+    dropped — NOT re-buffered. Pre-fix, a peer could cycle
+    fill→close→re-fill repeatedly, defeating HYP-455's cap.
+
+    Reproduces the pass-12 finding: after cap-trip, b'z'*1234
+    was accepted into a fresh buffer."""
+    sc, mgr = _make_subchannel(scid=42)
+    chunk = b"x" * (1 << 20)
+    for _ in range(MAX_PENDING_REMOTE_DATA_BYTES // len(chunk)):
+        sc.remote_data(chunk)
+    # Tip: fires cap.
+    sc.remote_data(b"\x00")
+    assert mgr.send_close_calls == [42], "cap-trip should send_close once"
+    assert sc._cap_tripped is True, "cap-trip flag must be set"
+
+    # The post-cap remote_data is dropped, NOT re-buffered.
+    sc.remote_data(b"z" * 1234)
+    assert sc._pending_remote_data == [], "buffer must stay empty"
+    assert sc._pending_remote_data_bytes == 0, (
+        "byte counter must stay zero — peer cannot cycle pressure"
+    )
+    # And no second close — the cap-trip is terminal, not chatty.
+    assert mgr.send_close_calls == [42], "send_close must fire only once"
+
+
+def test_pending_remote_data_cap_stays_terminal_under_repeated_data():
+    """The flag survives an arbitrary number of remote_data calls
+    after cap-trip — proving the channel is truly terminal."""
+    sc, mgr = _make_subchannel(scid=99)
+    chunk = b"x" * (1 << 20)
+    # Fire the cap.
+    for _ in range(MAX_PENDING_REMOTE_DATA_BYTES // len(chunk)):
+        sc.remote_data(chunk)
+    sc.remote_data(b"\x00")
+    assert sc._cap_tripped is True
+
+    # 100 follow-up data frames — none should be buffered.
+    for _ in range(100):
+        sc.remote_data(b"more")
+    assert sc._pending_remote_data == []
+    assert sc._pending_remote_data_bytes == 0
+    assert mgr.send_close_calls == [99]  # still just the one close
+
+
 # --- Cross-site: caps don't interfere with the happy path ---
 
 
