@@ -1063,6 +1063,17 @@ class Manager:
     )
 
 
+# HYP-456: cap the pre-dilate inbound message queue. Authenticated peer
+# can otherwise force unbounded growth in `_pending_inbound_dilate_messages`
+# while the local app hasn't yet called w.dilate(). HYP-446's phase-window
+# cap (W=64, ~64 KiB per phase) bounds practical exposure to ~4 MiB, but
+# the cap should apply at this layer too since a peer could pack many
+# small messages within HYP-446's window. Mirrors HYP-440's outbound cap
+# style (count + bytes).
+MAX_PENDING_INBOUND_DILATE_BYTES = 4 << 20  # 4 MiB
+MAX_PENDING_INBOUND_DILATE_COUNT = 256
+
+
 @attrs
 @implementer(IDilator)
 class Dilator:
@@ -1087,6 +1098,8 @@ class Dilator:
         self._pending_dilation_key = None
         self._pending_wormhole_versions = None
         self._pending_inbound_dilate_messages = deque()
+        # HYP-456: byte counter for the pre-dilate queue cap.
+        self._pending_inbound_dilate_total_bytes = 0
         self._did_dilate = Once(CanOnlyDilateOnceError)
 
     def wire(self, sender, terminator):
@@ -1155,6 +1168,8 @@ class Dilator:
             while self._pending_inbound_dilate_messages:
                 plaintext = self._pending_inbound_dilate_messages.popleft()
                 m.received_dilation_message(plaintext)
+            # HYP-456: byte counter resets along with the drained queue.
+            self._pending_inbound_dilate_total_bytes = 0
 
         return self._manager._api
 
@@ -1192,6 +1207,21 @@ class Dilator:
 
     def received_dilate(self, plaintext):
         if not self._manager:
+            # HYP-456: enforce queue caps before we accept the message.
+            # Both count AND byte caps run; a peer can otherwise pack
+            # many tiny messages within HYP-446's window.
+            if (
+                len(self._pending_inbound_dilate_messages)
+                >= MAX_PENDING_INBOUND_DILATE_COUNT
+                or self._pending_inbound_dilate_total_bytes + len(plaintext)
+                > MAX_PENDING_INBOUND_DILATE_BYTES
+            ):
+                log.msg(
+                    "HYP-456: dropping pre-dilate inbound dilate message "
+                    f"(queue cap reached; len={len(plaintext)})"
+                )
+                return
             self._pending_inbound_dilate_messages.append(plaintext)
+            self._pending_inbound_dilate_total_bytes += len(plaintext)
         else:
             self._manager.received_dilation_message(plaintext)
