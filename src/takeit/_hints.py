@@ -4,6 +4,7 @@ import ipaddress
 import math
 import numbers
 from collections import namedtuple
+from collections.abc import Mapping
 
 from twisted.internet.abstract import isIPAddress, isIPv6Address
 from twisted.internet.endpoints import (
@@ -133,6 +134,12 @@ def parse_tcp_v1_hint(hint, *, allow_private=False):  # hint_struct -> hint_obj
 
 
 def parse_hint(hint_struct, *, allow_private=False):
+    # HYP-450: belt-and-braces — primary defense lives in
+    # Manager._use_hints which filters non-dicts before calling here.
+    # Defensive check survives if a future caller forgets to pre-filter.
+    if not isinstance(hint_struct, Mapping):
+        log.msg(f"hint is not a mapping: {hint_struct!r}")
+        return None
     hint_type = hint_struct.get("type", "")
     if hint_type == "relay-v1":
         # the struct can include multiple ways to reach the same relay

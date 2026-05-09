@@ -486,9 +486,25 @@ class Manager:
             log.msg("dilation message: missing or non-string 'type'; dropping")
             return
 
+        # HYP-450: inner-shape validation per type. HYP-447 closed the
+        # top-level shape; this is the next layer down. A Noise-
+        # authenticated peer can still send a JSON-valid but
+        # schema-incomplete payload — `please` without `side`,
+        # `connection-hints` without `hints` (or with non-list `hints`,
+        # or non-dict elements) — and would crash downstream consumers
+        # with KeyError / TypeError / AttributeError. Validate here so
+        # malformed inner shape becomes log+drop, not protocol fault.
         if msg_type == "please":
+            if not isinstance(message.get("side"), str):
+                log.msg("dilation 'please': missing or non-string 'side'; dropping")
+                return
             self.rx_PLEASE(message)
         elif msg_type == "connection-hints":
+            if not isinstance(message.get("hints"), list):
+                log.msg(
+                    "dilation 'connection-hints': missing or non-list 'hints'; dropping"
+                )
+                return
             self.rx_HINTS(message)
             # todo: could be useful to put "hints" in status, and send
             # a status update when getting new hints?
@@ -860,11 +876,22 @@ class Manager:
         self._use_hints(hint_message)
 
     def _use_hints(self, hint_message):
+        # HYP-450: top-level `received_dilation_message` already enforced
+        # `hints` is a list. Per-element shape isn't validated upstream,
+        # so drop non-dict entries here before they reach `parse_hint`
+        # (which would otherwise crash on `.get` for ints, strings, etc).
+        raw_hints = hint_message["hints"]
+        well_shaped = [h for h in raw_hints if isinstance(h, dict)]
+        if len(well_shaped) != len(raw_hints):
+            log.msg(
+                f"dilation 'connection-hints': dropped "
+                f"{len(raw_hints) - len(well_shaped)} non-dict entries"
+            )
         hint_objs = filter(
             lambda h: h,  # ignore None, unrecognizable
             [
                 parse_hint(hs, allow_private=self._allow_private_hints)
-                for hs in hint_message["hints"]
+                for hs in well_shaped
             ],
         )
         hint_objs = list(hint_objs)
