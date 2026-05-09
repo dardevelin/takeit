@@ -19,37 +19,11 @@ inner shape in `received_dilation_message`; pre-filter non-dict
 elements in `_use_hints`; defensive Mapping check in `parse_hint`.
 """
 
-import json
-
 from takeit._dilation import manager as manager_mod
 from takeit._hints import parse_hint
 
-
-def _bytes(d):
-    return json.dumps(d).encode("utf-8")
-
-
-class _FakeManager:
-    """Captures dispatch calls without spinning up state machines."""
-
-    def __init__(self):
-        self.rx_PLEASE_called_with = None
-        self.rx_HINTS_called_with = None
-        self.rx_RECONNECT_called = False
-        self.rx_RECONNECTING_called = False
-
-    def rx_PLEASE(self, message):
-        self.rx_PLEASE_called_with = message
-
-    def rx_HINTS(self, message):
-        self.rx_HINTS_called_with = message
-
-    def rx_RECONNECT(self):
-        self.rx_RECONNECT_called = True
-
-    def rx_RECONNECTING(self):
-        self.rx_RECONNECTING_called = True
-
+from ._dilation_helpers import FakeDilationDispatcher as _FakeManager
+from ._dilation_helpers import bytes_for as _bytes
 
 # --- HYP-450: please.side shape validation ---
 

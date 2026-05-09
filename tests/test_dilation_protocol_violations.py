@@ -19,10 +19,10 @@ ValueError alongside Disconnect at the dataReceived layer, and to
 shape-validate the dilation message before key access.
 """
 
-import json
-
 from takeit._dilation import manager as manager_mod
 from takeit._dilation.connection import DilatedConnectionProtocol
+
+from ._dilation_helpers import FakeDilationDispatcher, bytes_for
 
 # --- HYP-447 (Site A): dataReceived catches ValueError ---
 
@@ -56,35 +56,8 @@ def test_dataReceived_catches_value_error():
 # --- HYP-447 (Site B): received_dilation_message shape-validates ---
 
 
-def _bytes_to_dict_via_module(d):
-    """Convert dict -> bytes using the same helper Manager uses to
-    decode plaintext. Keeps test wire-format aligned with code."""
-    return json.dumps(d).encode("utf-8")
-
-
-class _FakeManagerForReceivedDilation:
-    """Just enough Manager surface to exercise received_dilation_message
-    without spinning up the real state machines. Manager.received_*
-    methods don't need most of the constructor scaffolding when we're
-    only testing the dispatch entrypoint."""
-
-    def __init__(self):
-        self.rx_PLEASE_called_with = None
-        self.rx_HINTS_called_with = None
-        self.rx_RECONNECT_called = False
-        self.rx_RECONNECTING_called = False
-
-    def rx_PLEASE(self, message):
-        self.rx_PLEASE_called_with = message
-
-    def rx_HINTS(self, message):
-        self.rx_HINTS_called_with = message
-
-    def rx_RECONNECT(self):
-        self.rx_RECONNECT_called = True
-
-    def rx_RECONNECTING(self):
-        self.rx_RECONNECTING_called = True
+_FakeManagerForReceivedDilation = FakeDilationDispatcher
+_bytes_to_dict_via_module = bytes_for
 
 
 def test_received_dilation_message_drops_invalid_json():

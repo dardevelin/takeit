@@ -1739,6 +1739,10 @@ class _ReceiverProtocol(Protocol):
         # them via subsequent dataReceived calls.
 
     def _on_verify_failed(self, failure):
+        # HYP-451: `_verify_in_flight` is intentionally NOT cleared here;
+        # `_fail` sets `_stopped=True`, which `dataReceived` short-circuits
+        # on before any further flag reads. If a future refactor decouples
+        # `_stopped` from `_fail`, also clear `_verify_in_flight` here.
         self._fail(failure.value)
 
     def _consume_frames(self, data):

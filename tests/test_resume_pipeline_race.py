@@ -276,8 +276,8 @@ def test_hyp451_pipelined_chunk_during_verify_raises_protocol_error(
 
     # Verify is still in flight (held); the protocol should have failed
     # via _fail because the drain hit a chunk during _verify_in_flight.
-    assert proto._stopped is True
-    assert factory.done.called
+    assert proto._stopped is True, "protocol should have entered stopped state"
+    assert factory.done.called, "factory.done should have been errback'd"
     assert any(isinstance(e, P.ProtocolError) for e in errs), errs
 
 
