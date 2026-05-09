@@ -276,7 +276,10 @@ def test_set_code_without_validation_would_have_published():
     # entrypoint is the explicit bridge to words-only-wormhole protocol
     # shape). FakeRendezvous SHOULD see tx_open (proving the regression
     # test above exercises a real "didn't publish" condition).
-    w.set_code_legacy_words("purple-sausages-mocha")
+    # HYP-461: pass unsafe_relay_mitm_acknowledged=True (required at API).
+    w.set_code_legacy_words(
+        "purple-sausages-mocha", unsafe_relay_mitm_acknowledged=True
+    )
     eq.flush_sync()
     assert rv_a.opened, (
         "control test failed: set_code_legacy_words didn't trigger "

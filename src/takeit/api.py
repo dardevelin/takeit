@@ -25,7 +25,12 @@ from ._boss import Boss
 from ._dilation.connector import Connector
 from ._dilation.manager import DILATION_VERSIONS
 from ._key import derive_key
-from .errors import NoKeyError, WormholeClosed
+from .errors import (
+    LegacyVerifierNotChecked,
+    LegacyWordsRequiresAcknowledgement,
+    NoKeyError,
+    WormholeClosed,
+)
 from .eventual import EventualQueue
 from .observer import OneShotObserver, SequenceObserver
 from .timing import DebugTiming
@@ -49,6 +54,9 @@ class _DelegatedWormhole:
 
     def __attrs_post_init__(self):
         self._key = None
+        # HYP-461: track legacy + verifier-observed for the unsafe-words gate.
+        self._is_legacy_words = False
+        self._verifier_observed = False
 
     def _set_boss(self, boss):
         self._boss = boss
@@ -67,13 +75,45 @@ class _DelegatedWormhole:
         set_code_legacy_words explicitly."""
         self._boss.set_code(code)
 
-    def set_code_legacy_words(self, words):
-        """Set a legacy words-only code. The rendezvous path is
-        vulnerable to active relay MITM; out-of-band SAS comparison
-        via the verifier is REQUIRED. See Boss.set_code_legacy_words."""
+    def set_code_legacy_words(self, words, *, unsafe_relay_mitm_acknowledged=False):
+        """Set a legacy words-only code.
+
+        The rendezvous path is vulnerable to active relay MITM (the tag
+        is derived from words alone so a hostile relay can pre-compute
+        wordlist^N → tag mappings). HYP-461 requires:
+
+        1. ``unsafe_relay_mitm_acknowledged=True`` — explicit opt-in,
+           ensures callers grep-find this dangerous path.
+        2. The delegate MUST receive ``wormhole_got_verifier`` and
+           verify it out-of-band before this wormhole will accept
+           ``send_message()`` or ``dilate()`` calls.
+
+        See Boss.set_code_legacy_words.
+        """
+        if not unsafe_relay_mitm_acknowledged:
+            raise LegacyWordsRequiresAcknowledgement(
+                "set_code_legacy_words is vulnerable to active relay "
+                "MITM. Pass unsafe_relay_mitm_acknowledged=True to "
+                "acknowledge the risk, AND verify the SAS via the "
+                "wormhole_got_verifier delegate callback before "
+                "exchanging sensitive data. Use set_code(<locator>:<words>) "
+                "for MITM-resistant codes instead."
+            )
+        self._is_legacy_words = True
         self._boss.set_code_legacy_words(words)
 
+    def _check_legacy_verifier_gate(self, op):
+        # HYP-461: legacy session must observe the verifier before send/dilate.
+        if self._is_legacy_words and not self._verifier_observed:
+            raise LegacyVerifierNotChecked(
+                f"{op}() refused on legacy words-only session before "
+                "the verifier (SAS) was delivered. Wait for the "
+                "wormhole_got_verifier delegate callback and verify "
+                "the SAS out-of-band first."
+            )
+
     def send_message(self, plaintext):
+        self._check_legacy_verifier_gate("send_message")
         self._boss.send(plaintext)
 
     def derive_key(self, purpose, length):
@@ -89,6 +129,7 @@ class _DelegatedWormhole:
         return derive_key(self._key, to_bytes(purpose), length)
 
     def dilate(self, **kwargs):
+        self._check_legacy_verifier_gate("dilate")
         return self._boss.dilate(**kwargs)
 
     def close(self):
@@ -112,6 +153,12 @@ class _DelegatedWormhole:
         self._key = key
 
     def got_verifier(self, verifier):
+        # HYP-461: delivering the verifier to the delegate trips the
+        # gate. Delegates that don't display/compare the verifier are
+        # in the same boat as Deferred-mode callers who don't await
+        # get_verifier — both are wrong, but at least we've done our
+        # part by surfacing the verifier.
+        self._verifier_observed = True
         self._delegate.wormhole_got_verifier(verifier)
 
     def got_versions(self, versions):
@@ -137,6 +184,11 @@ class _DeferredWormhole:
         self._received_observer = SequenceObserver(eq)
         self._closed = False
         self._closed_observer = OneShotObserver(eq)
+        # HYP-461: legacy-words gate. set_code_legacy_words sets the
+        # first flag; awaiting get_verifier() sets the second; send/
+        # dilate require both before proceeding on legacy sessions.
+        self._is_legacy_words = False
+        self._verifier_observed = False
 
     def _set_boss(self, boss):
         self._boss = boss
@@ -153,6 +205,13 @@ class _DeferredWormhole:
         return self._key_observer.when_fired()
 
     def get_verifier(self):
+        # HYP-461: the act of asking for the verifier trips the legacy
+        # gate. A caller that calls get_verifier() then displays the
+        # SAS to the user has done what the gate requires; the gate
+        # cannot tell the difference between "displayed and compared"
+        # and "displayed and ignored" — the unsafe-flag opt-in already
+        # signaled the caller accepts that responsibility.
+        self._verifier_observed = True
         return self._verifier_observer.when_fired()
 
     def get_versions(self):
@@ -173,13 +232,44 @@ class _DeferredWormhole:
         set_code_legacy_words explicitly."""
         self._boss.set_code(code)
 
-    def set_code_legacy_words(self, words):
-        """Set a legacy words-only code. The rendezvous path is
-        vulnerable to active relay MITM; out-of-band SAS comparison
-        via the verifier is REQUIRED. See Boss.set_code_legacy_words."""
+    def set_code_legacy_words(self, words, *, unsafe_relay_mitm_acknowledged=False):
+        """Set a legacy words-only code.
+
+        The rendezvous path is vulnerable to active relay MITM (the tag
+        is derived from words alone so a hostile relay can pre-compute
+        wordlist^N → tag mappings). HYP-461 requires:
+
+        1. ``unsafe_relay_mitm_acknowledged=True`` — explicit opt-in,
+           ensures callers grep-find this dangerous path.
+        2. The caller MUST ``await get_verifier()`` and verify the SAS
+           out-of-band before this wormhole will accept
+           ``send_message()`` or ``dilate()`` calls.
+
+        See Boss.set_code_legacy_words.
+        """
+        if not unsafe_relay_mitm_acknowledged:
+            raise LegacyWordsRequiresAcknowledgement(
+                "set_code_legacy_words is vulnerable to active relay "
+                "MITM. Pass unsafe_relay_mitm_acknowledged=True to "
+                "acknowledge the risk, AND verify the SAS via "
+                "await get_verifier() before exchanging sensitive "
+                "data. Use set_code(<locator>:<words>) for "
+                "MITM-resistant codes instead."
+            )
+        self._is_legacy_words = True
         self._boss.set_code_legacy_words(words)
 
+    def _check_legacy_verifier_gate(self, op):
+        # HYP-461: legacy session must observe the verifier before send/dilate.
+        if self._is_legacy_words and not self._verifier_observed:
+            raise LegacyVerifierNotChecked(
+                f"{op}() refused on legacy words-only session before "
+                "the verifier (SAS) was observed. Await get_verifier() "
+                "and compare the SAS out-of-band first."
+            )
+
     def send_message(self, plaintext):
+        self._check_legacy_verifier_gate("send_message")
         self._boss.send(plaintext)
 
     def derive_key(self, purpose, length):
@@ -191,6 +281,7 @@ class _DeferredWormhole:
         return derive_key(self._key, to_bytes(purpose), length)
 
     def dilate(self, **kwargs):
+        self._check_legacy_verifier_gate("dilate")
         return self._boss.dilate(**kwargs)
 
     def close(self):

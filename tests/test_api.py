@@ -191,9 +191,13 @@ def test_set_code_legacy_words_path():
     Used by the CLI's words-only-with-verify flow and by library
     callers that explicitly want to bridge to upstream wormhole's
     words-only protocol shape. The function name mirrors
-    derive_tag_legacy_words to keep "legacy" loud."""
+    derive_tag_legacy_words to keep "legacy" loud.
+
+    HYP-461: requires explicit `unsafe_relay_mitm_acknowledged=True`."""
     eq, a, _ = _make_wormhole_pair()
-    a.set_code_legacy_words("purple-sausages-mocha")
+    a.set_code_legacy_words(
+        "purple-sausages-mocha", unsafe_relay_mitm_acknowledged=True
+    )
     assert _resolve(eq, a.get_code()) == "purple-sausages-mocha"
 
 
@@ -206,7 +210,7 @@ def test_set_code_legacy_words_refuses_canonical():
     eq, a, _ = _make_wormhole_pair()
     canonical = "abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha"
     with pytest.raises(ValueError, match="canonical|set_code"):
-        a.set_code_legacy_words(canonical)
+        a.set_code_legacy_words(canonical, unsafe_relay_mitm_acknowledged=True)
 
 
 # --- Delegated mode end-to-end ---
@@ -363,3 +367,106 @@ def test_relays_default_to_takeit_defaults():
     assert len(DEFAULT_RELAYS) >= 3
     for r in DEFAULT_RELAYS:
         assert r.startswith("wss://")
+
+
+# --- HYP-461: legacy-words API hardening ---
+
+
+def test_hyp461_legacy_words_requires_unsafe_flag_deferred():
+    """Without `unsafe_relay_mitm_acknowledged=True`, the legacy
+    entrypoint must refuse to set the code. Loud opt-in keeps the
+    dangerous path grep-able in caller code."""
+    from takeit.errors import LegacyWordsRequiresAcknowledgement
+
+    eq, a, _ = _make_wormhole_pair()
+    with pytest.raises(LegacyWordsRequiresAcknowledgement, match="MITM"):
+        a.set_code_legacy_words("purple-sausages-mocha")
+
+
+def test_hyp461_legacy_words_send_blocked_until_verifier_observed():
+    """Even with the unsafe flag, send_message() must refuse until
+    get_verifier() has been awaited. Defense-in-depth so a caller
+    that passes the flag but forgets to display the SAS still gets a
+    hard fail rather than silent MITM exposure."""
+    from takeit.errors import LegacyVerifierNotChecked
+
+    eq, a, _ = _make_wormhole_pair()
+    a.set_code_legacy_words(
+        "purple-sausages-mocha", unsafe_relay_mitm_acknowledged=True
+    )
+    with pytest.raises(LegacyVerifierNotChecked, match="verifier|SAS"):
+        a.send_message(b"sensitive")
+
+
+def test_hyp461_legacy_words_dilate_blocked_until_verifier_observed():
+    """Same gate fires for dilate(). A legacy session must observe the
+    verifier before opening the dilation channel."""
+    from takeit.errors import LegacyVerifierNotChecked
+
+    eq, a, _ = _make_wormhole_pair()
+    a.set_code_legacy_words(
+        "purple-sausages-mocha", unsafe_relay_mitm_acknowledged=True
+    )
+    with pytest.raises(LegacyVerifierNotChecked):
+        a.dilate(expected_subprotocols=frozenset())
+
+
+def test_hyp461_canonical_set_code_unaffected_by_gate():
+    """Canonical-shape codes don't go through set_code_legacy_words at
+    all, so the gate doesn't apply. send_message and dilate proceed
+    normally without get_verifier() being awaited first."""
+    eq, a, _ = _make_wormhole_pair()
+    canonical = "abcdefghijklmnopqrstuvwxyz:purple-sausages-mocha"
+    a.set_code(canonical)
+    # No exception — canonical sessions don't need the verifier gate.
+    # We don't actually call send_message because the SPAKE2 hasn't run
+    # in this test setup; the assertion is that no LegacyVerifier* fires
+    # in the gate check.
+    a._check_legacy_verifier_gate("send_message")  # no-op for non-legacy
+
+
+def test_hyp461_get_verifier_observation_unblocks_send():
+    """The canonical caller flow: legacy + unsafe flag, await
+    get_verifier (which trips _verifier_observed), THEN send. No
+    exception should fire on the gate."""
+    eq, a, _ = _make_wormhole_pair()
+    a.set_code_legacy_words(
+        "purple-sausages-mocha", unsafe_relay_mitm_acknowledged=True
+    )
+    a.get_verifier()  # observation trips the flag
+    # Direct probe of the gate to avoid driving the full SPAKE2
+    # handshake — the gate is what HYP-461 is about.
+    a._check_legacy_verifier_gate("send_message")  # must not raise
+
+
+def test_hyp461_legacy_words_requires_unsafe_flag_delegated():
+    """Delegated mode mirrors Deferred mode: the unsafe flag is
+    required."""
+    from takeit.errors import LegacyWordsRequiresAcknowledgement
+
+    @implementer(_interfaces.IWormholeDelegate)
+    class _D:
+        def wormhole_got_welcome(self, w):
+            pass
+
+        def wormhole_got_code(self, c):
+            pass
+
+        def wormhole_got_unverified_key(self, k):
+            pass
+
+        def wormhole_got_verifier(self, v):
+            pass
+
+        def wormhole_got_versions(self, v):
+            pass
+
+        def wormhole_got_message(self, m):
+            pass
+
+        def wormhole_closed(self, r):
+            pass
+
+    eq, a, _ = _make_wormhole_pair(delegate_a=_D(), delegate_b=_D())
+    with pytest.raises(LegacyWordsRequiresAcknowledgement, match="MITM"):
+        a.set_code_legacy_words("purple-sausages-mocha")

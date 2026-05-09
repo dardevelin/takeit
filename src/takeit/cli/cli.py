@@ -1134,11 +1134,17 @@ def _set_code_routed(w, code):
     codes go to `w.set_code_legacy_words` so the relay-MITM-vulnerable
     path is syntactically conspicuous. Callers MUST have already run
     `_validate_words_only_handoff` (so a bare-words code reaching here
-    implies `--verify` was passed)."""
+    implies `--verify` was passed).
+
+    HYP-461: the legacy path now requires explicit
+    unsafe_relay_mitm_acknowledged=True at the API boundary. The CLI
+    has already checked --verify upstream, so passing the flag here
+    expresses "we know this is unsafe AND we're going to display the
+    SAS via --verify"."""
     if ":" in code:
         w.set_code(code)
     else:
-        w.set_code_legacy_words(code)
+        w.set_code_legacy_words(code, unsafe_relay_mitm_acknowledged=True)
 
 
 # ---- Receive flow ----

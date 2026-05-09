@@ -54,3 +54,21 @@ class WormholeClosed(Exception):
 
 class _UnknownPhaseError(Exception):
     """internal exception type, for tests."""
+
+
+class LegacyWordsRequiresAcknowledgement(WormholeError):
+    """HYP-461: set_code_legacy_words() was called without
+    `unsafe_relay_mitm_acknowledged=True`. The legacy words-only path
+    is vulnerable to active relay MITM (the rendezvous tag is
+    derived from the words alone, so a hostile relay can pre-compute
+    every wordlist^N → tag mapping). Pass the kwarg AND verify the
+    SAS via get_verifier() before exchanging sensitive data, or use
+    the canonical `<locator>:<words>` form via set_code()."""
+
+
+class LegacyVerifierNotChecked(WormholeError):
+    """HYP-461: send_message() or dilate() was called on a legacy
+    words-only session without the caller awaiting get_verifier()
+    first. The verifier (SAS) MUST be compared out-of-band before
+    sending sensitive data on a legacy session — that's the only
+    mitigation against active relay MITM."""
