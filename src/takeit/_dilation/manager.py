@@ -331,8 +331,13 @@ class Manager:
         # into separate pieces.
         self._inbound = Inbound(self, self._host_addr)
         # HYP-440: pass reactor so Outbound can run the ACK heartbeat.
+        # HYP-453 follow-up: `attrs` strips the leading underscore from
+        # `_reactor = attrib(...)` when generating __init__, so the kwarg
+        # is `reactor=`, not `_reactor=`. The pre-fix `_reactor=self._reactor`
+        # raised TypeError at runtime; no existing test constructed a real
+        # Manager, so it slipped through HYP-440's review.
         self._outbound = Outbound(
-            self, self._cooperator, _reactor=self._reactor
+            self, self._cooperator, reactor=self._reactor
         )  # from us to peer
 
         # TODO: let inbound/outbound create the endpoints, then return them

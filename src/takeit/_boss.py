@@ -274,11 +274,20 @@ class Boss:
         no_listen=False,
         on_status_update=None,
         ping_interval=None,
+        allow_private_hints=False,
+        stun_servers=(),
     ):
         # HYP-442: forward keyword-only-required expected_subprotocols
         # straight through to the Dilator. The TypeError check fires
         # there; we don't pre-empt it here because that would bury the
         # actual call site in a stack of indirection.
+        #
+        # HYP-453: allow_private_hints + stun_servers were added to
+        # Dilator.dilate (HYP-439, HYP-449) and to the CLI call sites,
+        # but Boss.dilate's plumbing was missed — `w.dilate(...)` would
+        # raise TypeError at runtime. The grep-only test in
+        # test_subchannel_expected.py didn't catch it because it never
+        # invoked the call. Test gap closed by tests/test_boss_dilate_kwargs.py.
         return self._D.dilate(
             transit_relay_location=transit_relay_location,
             no_listen=no_listen,
@@ -286,6 +295,8 @@ class Boss:
             status_update=on_status_update,
             ping_interval=ping_interval,
             expected_subprotocols=expected_subprotocols,
+            allow_private_hints=allow_private_hints,
+            stun_servers=stun_servers,
         )
 
     @m.input()
