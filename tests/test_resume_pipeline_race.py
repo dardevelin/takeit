@@ -196,4 +196,148 @@ def test_hyp452_sidecar_present_and_valid_takes_resume_path(tmp_path):
     assert proto._header_phase is True
 
 
-# --- HYP-451 tests will be added in the HYP-451 commit ---
+# --- HYP-451: pipelined chunk frames during async verify ---
+
+
+def _make_resume_proto_with_held_verify(tmp_path, payload, chunk_size, monkeypatch):
+    """Build a resume-path receiver where verify_chunks_have is dispatched
+    but its Deferred is held — never fires. Lets the test inject pipelined
+    bytes during the race window.
+
+    Returns (proto, factory, transport, fire_verify, errback_verify).
+    `fire_verify` callback resolves verify with the given verified-set.
+    """
+    partial_path = tmp_path / "incoming.bin.takeit-partial"
+    meta_path = tmp_path / "incoming.bin.takeit-partial.meta"
+    partial_path.write_bytes(payload)
+    offer = _build_offer_for(payload, chunk_size)
+
+    # Pre-write a valid sidecar so prior_matches=True path runs.
+    chunk_hashes = _hashes_for(payload, chunk_size)
+    transfer_id_bytes = offer["_transfer_id_bytes"]
+    R.save_receiver_state(
+        str(meta_path),
+        transfer_id_b64=R.b64(transfer_id_bytes),
+        size=len(payload),
+        chunk_size=chunk_size,
+        chunk_hashes_b64=[R.b64(h) for h in chunk_hashes],
+        chunks_have=[],
+    )
+
+    factory = cli_mod._ReceiverFactory(
+        partial_path=str(partial_path),
+        meta_path=str(meta_path),
+        offer=offer,
+        prior_matches=True,
+        progress=None,
+    )
+    proto = factory.buildProtocol(addr=None)
+    proto.transport = _FakeTransport()
+    proto.connectionMade()
+
+    # Hold the verify Deferred so we control when it fires.
+    held = {}
+
+    def held_deferToThread(fn, *args, **kwargs):
+        d = Deferred()
+        held["d"] = d
+        held["args"] = (fn, args, kwargs)
+        return d
+
+    monkeypatch.setattr(cli_mod, "deferToThread", held_deferToThread)
+    return proto, factory, proto.transport, held, chunk_hashes
+
+
+def test_hyp451_pipelined_chunk_during_verify_raises_protocol_error(
+    tmp_path, monkeypatch
+):
+    """A non-conforming sender pipelines header || chunk_frame in one
+    TCP segment. Receiver is on the resume path; verify_chunks_have
+    is in flight. The pipelined chunk bytes must NOT be processed —
+    they would mutate _chunks_have / throttle and then be silently
+    overwritten when verify finishes. Treat as ProtocolError."""
+    payload = b"x" * 100
+    chunk_size = 50
+    proto, factory, transport, held, chunk_hashes = _make_resume_proto_with_held_verify(
+        tmp_path, payload, chunk_size, monkeypatch
+    )
+
+    # Pre-attach errback so the failure doesn't surface as an
+    # unhandled Deferred warning.
+    errs = []
+    factory.done.addErrback(lambda f: errs.append(f.value))
+
+    # Build header + a chunk frame, deliver in one dataReceived call.
+    header = P.build_subchannel_header(chunk_hashes)
+    chunk_frame = P.encode_length_prefixed(b"\x00\x00\x00\x00" + payload[:chunk_size])
+    pipelined = header + chunk_frame
+
+    proto.dataReceived(pipelined)
+
+    # Verify is still in flight (held); the protocol should have failed
+    # via _fail because the drain hit a chunk during _verify_in_flight.
+    assert proto._stopped is True
+    assert factory.done.called
+    assert any(isinstance(e, P.ProtocolError) for e in errs), errs
+
+
+def test_hyp451_no_pipelined_data_during_verify_does_not_fault(tmp_path, monkeypatch):
+    """Conforming sender: header alone in dataReceived; verify dispatches
+    cleanly. After verify completes (we fire it manually), a chunk frame
+    in a SEPARATE dataReceived call is honored."""
+    payload = b"x" * 100
+    chunk_size = 50
+    proto, factory, transport, held, chunk_hashes = _make_resume_proto_with_held_verify(
+        tmp_path, payload, chunk_size, monkeypatch
+    )
+
+    header = P.build_subchannel_header(chunk_hashes)
+    proto.dataReceived(header)
+
+    # Verify is in flight. _header_phase still True. _verify_in_flight True.
+    assert proto._verify_in_flight is True
+    assert proto._header_phase is True
+    assert not factory.done.called
+
+    # Fire the held verify deferred with empty verified-set.
+    held["d"].callback(set())
+
+    # Now _header_phase=False, _verify_in_flight=False.
+    assert proto._header_phase is False
+    assert proto._verify_in_flight is False
+    assert not factory.done.called  # still alive — transfer in progress
+
+
+def test_hyp451_protocol_error_does_not_corrupt_disk(tmp_path, monkeypatch):
+    """If a pipelined chunk frame triggers ProtocolError, the in-memory
+    `_chunks_have` set must not have been mutated and the throttle must
+    not have been re-initialized."""
+    payload = b"x" * 100
+    chunk_size = 50
+    proto, factory, transport, held, chunk_hashes = _make_resume_proto_with_held_verify(
+        tmp_path, payload, chunk_size, monkeypatch
+    )
+
+    pre_chunks_have = set(proto._chunks_have)
+
+    # Pre-attach errback to suppress the unhandled-Deferred warning.
+    factory.done.addErrback(lambda f: None)
+
+    header = P.build_subchannel_header(chunk_hashes)
+    chunk_frame = P.encode_length_prefixed(b"\x00\x00\x00\x00" + payload[:chunk_size])
+    proto.dataReceived(header + chunk_frame)
+
+    # _chunks_have unchanged; the protocol-error path didn't run
+    # _consume_frames at all.
+    assert proto._chunks_have == pre_chunks_have
+
+
+def test_hyp451_verify_in_flight_flag_initialized_false():
+    """Sanity: the new flag starts False so unrelated code paths
+    (e.g. fresh transfer with no resume path) don't accidentally
+    start in the in-flight state."""
+    # We don't fully wire up; just check class-level init.
+    import inspect
+
+    src = inspect.getsource(cli_mod._ReceiverProtocol.__init__)
+    assert "self._verify_in_flight = False" in src

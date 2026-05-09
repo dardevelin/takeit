@@ -1555,6 +1555,11 @@ class _ReceiverProtocol(Protocol):
         self._total_chunks = None
         self._throttle = None
         self._stopped = False
+        # HYP-451: True while verify_chunks_have runs off-thread. A
+        # conforming sender must wait for chunks_have before sending
+        # chunk frames, so any chunk-phase bytes in this window indicate
+        # a non-conforming or hostile peer. Treated as ProtocolError.
+        self._verify_in_flight = False
 
     def connectionMade(self):
         # Open the partial file safely. The audit (HYP-408) found two
@@ -1601,17 +1606,28 @@ class _ReceiverProtocol(Protocol):
                 for body in self._header_decoder.feed(data):
                     # Got the full header.
                     self._on_header_received(body)
-                    # HYP-434: drain any pipelined post-header bytes the
-                    # decoder buffered with the header. A peer that
-                    # writes `header || first chunk frame` in one TCP
-                    # segment leaves chunk bytes inside the header
-                    # decoder; without draining, the chunk protocol
-                    # stalls waiting for data that already arrived. A
-                    # conforming peer waits for chunks_have before
-                    # sending chunk frames, so this defends against
-                    # mis-implemented or hostile senders.
+                    # HYP-434 / HYP-451: drain any pipelined post-header
+                    # bytes the decoder buffered with the header. The
+                    # CHUNK-protocol spec says senders MUST wait for
+                    # `chunks_have` before sending chunk frames — any
+                    # bytes here are non-conforming.
+                    #
+                    # If verify_chunks_have is in flight (resume path),
+                    # we cannot process pipelined chunk bytes — they'd
+                    # mutate `_chunks_have` and `_throttle`, then get
+                    # silently overwritten when verify finishes,
+                    # discarding the in-memory bookkeeping for those
+                    # chunks. Treat as ProtocolError. For fresh
+                    # transfers (no resume), verify is synchronous via
+                    # _on_chunks_have_verified(set(), []), so the flag
+                    # is False here and we honor HYP-434's drain-
+                    # passthrough behavior.
                     remaining = self._header_decoder.drain_remaining()
                     if remaining:
+                        if self._verify_in_flight:
+                            raise P.ProtocolError(
+                                "chunk frames received before chunks_have ack"
+                            )
                         self._consume_frames(remaining)
                     return
             except P.ProtocolError as e:
@@ -1675,6 +1691,10 @@ class _ReceiverProtocol(Protocol):
                 self._on_chunks_have_verified(set(), [])
                 return
             claimed = list(prior.get("chunks_have", []))
+            # HYP-451: pipelined chunk frames received before
+            # _on_chunks_have_verified runs must be rejected; the flag
+            # gates dataReceived's drain-passthrough.
+            self._verify_in_flight = True
             d = deferToThread(
                 R.verify_chunks_have,
                 self._factory._partial_path,
@@ -1691,6 +1711,8 @@ class _ReceiverProtocol(Protocol):
     def _on_chunks_have_verified(self, verified, claimed):
         if self._stopped:
             return
+        # HYP-451: verify finished; chunk-phase bytes are now legitimate.
+        self._verify_in_flight = False
         chunks_have = sorted(verified)
         dropped = len(claimed) - len(chunks_have)
         if dropped:
